@@ -2,6 +2,8 @@
 #include "sim.h"
 #include "creworld.h"
 #include "entitydraw.h"
+#include "spawn.h"        /* q2_spawn_place: the Population record's box drop */
+#include "worldscale.h"   /* Q2_EYE_BASE: the record's y is the object's +286  */
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -240,6 +242,60 @@ static bool capture_entity(q2_zone_runtime *r, const q2_entity *e, u32 slot)
     return true;
 }
 
+/*
+ * GeneralRespawnStuffStore, 0x8007D318 -- what the console keeps of a LIVING
+ * creature at a zone gate, written here as GeneralRespawnStuff (0x8007D158)
+ * decodes it, so that the record restores without a second conversion.
+ *
+ * The record is 12 bytes when every coordinate (+0x54/+0x58/+0x5C, raw) fits a
+ * signed halfword and health/4 (toward zero: `bgez`, `addiu 3`, `sra 2`,
+ * 0x8007D37C..0x8007D390) fits a signed byte (0x8007D334..0x8007D3A4); then
+ * the position is stored as halfwords (y + 286, 0x8007D3F0) and the health as
+ * that byte, decoded `<< 2` (0x8007D1E4..0x8007D1E8). Otherwise 20 bytes carry
+ * the position and the health whole. Both forms pack into the first word the
+ * class (+0xD2 & 0x3F, bits 1..6), eleven spawn-flag bits (bits 7..17: the
+ * edict's +0x1C >> 18 & 0x1FF or the record's +0xF2 & 0x600, 0x8007D3BC..
+ * 0x8007D3D4), the target in eight bits (bits 18..25, 0x8007D524) and the yaw
+ * in six (+0xE8 & 0xFFF >> 6, bits 26..31, 0x8007D40C..0x8007D418). The target
+ * is the edict's +0x16, or, when that is zero and the creature is walking to a
+ * class-114 path corner (+0x88, byte +0x23), the corner's +0x18 (0x8007D454..
+ * 0x8007D488). Nothing else: no move, frame, enemy, think or deadline.
+ */
+static void store_living_record(q2_zone_object *o, const q2_creature_world *w,
+                                const q2_monster *m)
+{
+    const s32 *pos = q2_cre_origin(m);
+    s32 h = m->health;
+    s32 quarter = h < 0 ? (h + 3) >> 2 : h >> 2;
+    bool compact = pos[0] >= INT16_MIN && pos[0] <= INT16_MAX &&
+                   pos[1] >= INT16_MIN && pos[1] <= INT16_MAX &&
+                   pos[2] >= INT16_MIN && pos[2] <= INT16_MAX &&
+                   quarter >= INT8_MIN && quarter <= INT8_MAX;
+    s32 target = m->target;
+    u32 flags = (m->spawnflags >> 18) & 0x1FFu;
+    q2_pop_group g;
+    q2_pop_spawn rec;
+    if (compact) {
+        /* `sh` of y + 286, read back with `lh`: whole unless y lies within
+         * 286 of the halfword's top, where the console's record wraps. */
+        o->pos[0] = (s16)pos[0];
+        o->pos[1] = (s32)(s16)(pos[1] + Q2_EYE_BASE) - Q2_EYE_BASE;
+        o->pos[2] = (s16)pos[2];
+        o->health = (s16)(quarter * 4);
+    } else {
+        memcpy(o->pos, pos, sizeof(o->pos));
+        o->health = h;
+    }
+    o->yaw = q2_cre_yaw(m) & 0xFC0;
+    if (!target && m->movetarget && m->movetarget->class_id == Q2_CLASS_PATH_CORNER)
+        target = m->movetarget->targetname;
+    o->target = (s16)(target & 0xFF);
+    if (w && w->pop_ready && q2_pop_get_group(&w->pop, m->group, &g) &&
+        q2_pop_get_spawn(&w->pop, &g, m->population_slot, &rec))
+        flags |= rec.flags & 0x600u;
+    o->spawnflags = flags;
+}
+
 static bool assign_serial(q2_zone_population *p, u32 *serial)
 {
     if (!*serial) {
@@ -348,9 +404,15 @@ q2_result q2_zone_history_capture(q2_zone_history *h, const char *map, int zone,
         o = object_open(&p, Q2_ZONE_CREATURE, m->group, m->population_slot);
         if (!o) goto no_memory;
         o->zone = zone; o->id = m->pop_class_id; o->removed = !m->in_use;
-        o->dead = m->dead; o->health = m->health; o->frame = m->frame;
-        o->yaw = q2_cre_yaw(m); o->target = m->target; o->spawnflags = m->spawnflags;
-        memcpy(o->pos, q2_cre_origin(m), sizeof(o->pos));
+        o->dead = m->dead; o->frame = m->frame;
+        if (m->in_use && !m->dead && !m->corpse) store_living_record(o, world, m);
+        else {
+            /* A body's runtime is what comes back; a cold save's dying creature
+             * keeps full precision until a gate finishes it. */
+            o->health = m->health; o->yaw = q2_cre_yaw(m); o->target = m->target;
+            o->spawnflags = (m->spawnflags >> 18) & 0x1FFu;
+            memcpy(o->pos, q2_cre_origin(m), sizeof(o->pos));
+        }
         if (!m->in_use) { free(o->runtime); o->runtime = NULL; continue; }
         if (!runtime_open(o, sim)) goto no_memory;
         if (!q2_zone_capture_monster(o->runtime, world, m)) goto invalid;
@@ -481,7 +543,7 @@ void q2_zone_history_items(const q2_zone_history *h, const char *map, int zone,
     }
 }
 
-void q2_zone_history_creatures(const q2_zone_history *h, const char *map,
+void q2_zone_history_creatures(q2_zone_history *h, const char *map,
                                 int zone, q2_sim *sim, q2_creature_world *world)
 {
     const q2_zone_population *p = find_map(h, map);
@@ -496,7 +558,7 @@ void q2_zone_history_creatures(const q2_zone_history *h, const char *map,
     }
     for (i = 0; i < world->set.count; i++) {
         q2_monster *m = &world->set.monsters[i];
-        const q2_zone_object *o = find_object(p, Q2_ZONE_CREATURE, m->group, m->population_slot);
+        q2_zone_object *o = find_object(p, Q2_ZONE_CREATURE, m->group, m->population_slot);
         bool here;
         m->population_active = m->in_use;
         if (!o || o->id != m->pop_class_id) continue;
@@ -512,21 +574,73 @@ void q2_zone_history_creatures(const q2_zone_history *h, const char *map,
         m->dead = here && o->dead != 0;
         m->health = o->health; m->angles[2] = (s16)o->yaw;
         m->ideal_yaw = m->angles[2]; m->target = o->target;
-        m->spawnflags = o->spawnflags;
+        /* 0x8007E618..0x8007E62C: the record's nine bits into +0x1C 18..26. */
+        m->spawnflags = (m->spawnflags & 0xF803FFFFu) | ((o->spawnflags & 0x1FFu) << 18);
         memcpy(m->pos, o->pos, sizeof(m->pos));
-        /* Older zone histories have no actor state to resume. */
+        if (!o->dead) {
+            /*
+             * GeneralRespawnStuff, 0x8007D158: the record becomes a spawn
+             * record -- class, position, yaw & 0xFFF, target, spawn flags
+             * (0x8007D2A8..0x8007D2E4) -- and SpawnGeneral (0x800565C4) spawns
+             * it afresh. Its skill test on +0x14 (0x800/0x1000/0x2000,
+             * 0x80056620..0x80056660) cannot refuse a record whose flags are
+             * eleven bits, and 0x8007E440 places it through SetupBoxDrop
+             * (0x80050FA0) from the record's y: the drop a Population record
+             * takes here (q2_spawn_place; the console passes a zero drop for
+             * record classes 2, 7, 8 and 11 -- Boss2, an unused id, Flyer and
+             * Hover -- at 0x8007E4CC..0x8007E508, which the shared placement
+             * does not distinguish for a Population record either). The stored health
+             * is written before export 0 (0x8007E680) -- here, before the wake
+             * -- and again after it, by q2_zone_history_spawned (0x8007D304).
+             * Nothing of the live move survives: no runtime is resumed, and
+             * the one a cold save may have left on this record is consumed.
+             */
+            if (m->in_use && world->placement_coll) {
+                q2_pop_spawn rec = {0};
+                s32 origin[3];
+                rec.x = o->pos[0]; rec.y = o->pos[1] + Q2_EYE_BASE; rec.z = o->pos[2];
+                if (q2_spawn_place(&rec, world->placement_coll, world->placement_world, origin))
+                    memcpy(m->pos, origin, sizeof(m->pos));
+            }
+            free(o->runtime);
+            o->runtime = NULL;
+            q2_cre_motion_init(m);
+            m->spawn_initialized = false;
+            m->resume_pending = false;
+            continue;
+        }
+        /* A body: FinishDying's result, carried whole (zonestate.h). */
         q2_cre_motion_init(m);
-        /* A saved actor has already executed export 0. Its runtime restores
-         * below without consuming another spawn's random draws. */
         if (o->runtime) {
+            /* Already past export 0; its runtime restores after the wake
+             * without consuming another spawn's random draws. */
             m->spawn_initialized = true;
             m->resume_pending = here;
-        }
-        if (m->dead && !o->runtime) {
+        } else {
+            /* A version-1 history: no runtime, only the resting frame. */
+            if (m->in_use) m->spawnflags |= Q2_SVFLAG_INUSE;
             q2_monster_corpse_detach(m);
             m->frame = (s16)o->frame;
             m->think = NULL;
         }
+    }
+}
+
+void q2_zone_history_spawned(const q2_zone_history *h, const char *map,
+                             q2_sim *sim, q2_creature_world *world)
+{
+    const q2_zone_population *p = find_map(h, map);
+    u32 i;
+    if (!world || !world->pop_ready || !sim || sim->multiplayer || !p ||
+        p->identity != identity(&world->pop)) return;
+    for (i = 0; i < world->set.count; i++) {
+        q2_monster *m = &world->set.monsters[i];
+        const q2_zone_object *o = find_object(p, Q2_ZONE_CREATURE, m->group, m->population_slot);
+        if (!m->in_use || m->dead || m->corpse || !m->spawn_initialized || !o ||
+            o->removed || o->dead || o->id != m->pop_class_id) continue;
+        /* 0x8007D2FC..0x8007D304: `lhu` the decoded health, `sh` into +0x108
+         * of the object SpawnGeneral returned -- over whatever export 0 set. */
+        m->health = o->health;
     }
 }
 

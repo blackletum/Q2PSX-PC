@@ -3560,7 +3560,8 @@ static void write_zone_history(wbuf *w, const q2_save *s)
     size_t at;
     if (!s->zone_history_present) return;
     at = w_chunk_begin(w, TAG_ZPOP);
-    w_u32(w, 6);
+    /* v7: a creature's spawnflags is the console's eleven-bit record field. */
+    w_u32(w, 7);
     w_u32(w, s->zone_history.count);
     for (i = 0; i < s->zone_history.count; i++) {
         const q2_zone_population *p = &s->zone_history.map[i];
@@ -3592,7 +3593,7 @@ static void write_zone_history(wbuf *w, const q2_save *s)
 static bool read_zone_history(rbuf *r, q2_save *s)
 {
     u32 i, j, count, version = r_u32(r);
-    if (s->zone_history_present || version < 1 || version > 6) return false;
+    if (s->zone_history_present || version < 1 || version > 7) return false;
     count = r_u32(r);
     if (r->bad || count > Q2_ZONE_HISTORY_MAPS ||
         !r_need(r, (size_t)count * (Q2_ZONE_MAP_NAME + 8))) return false;
@@ -3631,6 +3632,10 @@ static bool read_zone_history(rbuf *r, q2_save *s)
             o->health = r_s16(r); o->scale = r_s16(r); o->target = r_s16(r);
             r_s32v(r, o->pos, 3); o->yaw = r_s32(r); o->frame = r_s32(r);
             o->remove_in = r_s32(r); o->respawn_at = r_s32(r); o->spawnflags = r_u32(r);
+            /* Before v7 a creature carried the edict's +0x1C word; the record's
+             * nine bits are 18..26 of it (zonestate.h). */
+            if (version < 7 && o->kind == Q2_ZONE_CREATURE)
+                o->spawnflags = (o->spawnflags >> 18) & 0x1FFu;
             if (version >= 2 && !read_zone_runtime(r, o, version)) return false;
         }
     }

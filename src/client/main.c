@@ -2557,6 +2557,43 @@ static void client_cre_seed_animation(client *c, u32 i)
     p->seed_pending = false;
 }
 
+/*
+ * RespawnQuakeDeadBody's pose, 0x8007D748..0x8007D75C: a body that came back
+ * through a zone gate rests on the LAST TICK of the clip its stored frame is
+ * in. QuakeStoreInanimate (0x80059BC4) hands the body's +0x100 to
+ * FindAnimSequenceNumFromFrame (0x8006DA3C), which walks model+0x34
+ * subtracting clip lengths; LastFrameFromSequenceNum (0x8006DAB4) sums the
+ * lengths of clips 0..n and subtracts one (`addiu s1, zero, -1` at 0x8006DAC4,
+ * `addu` at 0x8006DAEC), and 0x8007D75C writes the result into the new body's
+ * +0x100. Both walks are in the unit of +0x100 -- tenths of an animation
+ * frame, BodgeAnimData having scaled every clip length by ten at load -- so the
+ * answer is the clip's end, not its last whole frame: on every death clip the
+ * disc has (three animation frames per AI frame, one clip per move) that is two
+ * animation frames and nine tenths past the position the move's last AI frame
+ * put the body on. The corpse handler 0x8007F71C never advances the cursor,
+ * and neither does q2_monster_corpse_tick, so the pose written here stands.
+ */
+static void client_cre_pose_returned_body(client *c, u32 i)
+{
+    q2_monster *m = &c->creatures.set.monsters[i];
+    const q2_model *mdl = &c->cre_model[i];
+    const q2_cre_frame_name *rec;
+    q2_model_anim clip;
+    u32 pos = 0, within = 0, end;
+    bool held = false;
+    if (!m->in_use || !m->corpse || !c->cre_model_ok || !c->cre_model_ok[i]) return;
+    rec = q2_creature_world_frame_name(&c->creatures, m, m->frame);
+    if (!rec || !q2_model_position_for_move(mdl, rec->name, m->frame, rec->first, &pos) ||
+        !q2_model_anim_at_position_held(mdl, pos, &clip, &within, &held))
+        return;
+    end = q2_model_anim_base(mdl, &clip) + (u32)clip.frames * Q2_MODEL_TICKS_PER_FRAME - 1u;
+    m->motion.anim_position = m->motion.anim_previous = (s16)end;
+    m->motion.anim_base = (u16)end & 0x7FFFu;
+    m->motion.anim_flags = 0;        /* no transition: +0xB0's blend bits clear */
+    m->motion.animation_ready = true;
+    m->motion.seed_pending = false;
+}
+
 /* A restored population must find its cells again in the current hull. */
 static void client_cre_area_forget(client *c)
 {
@@ -3042,6 +3079,10 @@ static void client_load_creatures(client *c, const s32 eye[3])
         player_origin[2] = eye[2];
         q2_creature_world_wake(&c->creatures, player_origin,
                                c->sim[0].combat.inv.health);
+        /* GeneralRespawnStuff's tail (0x8007D304): the stored health over
+         * what SpawnGeneral and the module's export 0 just set. */
+        if (!c->mp_enabled && !c->restoring_save)
+            q2_zone_history_spawned(&c->zone_history, c->map, &c->sim[0], &c->creatures);
     }
     for (i = 0; i < c->creatures.set.count; i++) client_cre_seed_animation(c, i);
     c->ai_accum = 0.0;
@@ -3051,6 +3092,9 @@ static void client_load_creatures(client *c, const s32 eye[3])
         q2_zone_history_resume(&c->zone_history, c->map, c->zone_index, &c->sim[0],
                                 &c->creatures, c->cre_actor, c->cre_anim, &phase_us);
         c->ai_accum = (double)phase_us / 1000000.0;
+        /* Every body in a freshly loaded zone came back through the store;
+         * RespawnQuakeDeadBody poses each on its clip's last tick. */
+        for (i = 0; i < c->creatures.set.count; i++) client_cre_pose_returned_body(c, i);
     }
     c->batch_queued = 0;          /* a new zone starts with none pending */
     c->batches_deferred = false;  /* until its first frame */

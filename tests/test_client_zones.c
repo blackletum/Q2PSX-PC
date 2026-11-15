@@ -44,6 +44,8 @@ static void test_population_history(void)
         monsters[i].dead = i == 0;
         monsters[i].health = i == 0 ? -100 : 13;
         monsters[i].pos[0] = 345;
+        monsters[i].angles[2] = 1234;
+        monsters[i].spawnflags = Q2_SPAWNFLAG_AMBUSH | Q2_SVFLAG_INUSE | 0x5u;
         monsters[i].target = 9;
     }
     CHECK(q2_zone_history_capture(&history, "TEST", 0, sim, world, NULL, NULL, 0) == Q2_OK);
@@ -63,16 +65,32 @@ static void test_population_history(void)
         monsters[i].spawn_pending = true;
     }
     q2_zone_history_creatures(&history, "TEST", 0, sim, world);
-    CHECK(monsters[0].in_use && monsters[0].health == 13 && monsters[0].pos[0] == 345);
+    /* GeneralRespawnStuffStore's 12-byte form (0x8007D318): health 13 is
+     * stored as 13 >> 2 and comes back as 12; the yaw loses its low six bits
+     * (1234 -> 1216); of the edict's spawn flags only bits 18..26 are kept. */
+    CHECK(monsters[0].in_use && monsters[0].health == 12 && monsters[0].pos[0] == 345);
+    CHECK(monsters[0].angles[2] == 1216 && monsters[0].ideal_yaw == 1216);
+    CHECK(monsters[0].spawnflags == Q2_SPAWNFLAG_AMBUSH);
     CHECK(monsters[0].target == 9 && !monsters[0].spawn_pending);
+    CHECK(!monsters[0].spawn_initialized && !monsters[0].resume_pending);
     CHECK(!monsters[1].in_use && monsters[1].dead && !monsters[1].spawn_pending);
+    /* Object 0 is the item place; 1 the body, whose word's bit 18 is record
+     * bit 0; 2 the living record, nine bits plus whatever 0x600 the record has. */
+    CHECK(history.map[0].object[1].kind == Q2_ZONE_CREATURE &&
+          history.map[0].object[1].spawnflags == 0x1u);
+    CHECK((history.map[0].object[2].spawnflags & 0x1FFu) == 0x1u);
+    /* The tail of GeneralRespawnStuff (0x8007D304): the record's health over
+     * whatever SpawnGeneral and export 0 left, once the spawn has run. */
+    monsters[0].spawn_initialized = true; monsters[0].health = 20;
+    q2_zone_history_spawned(&history, "TEST", sim, world);
+    CHECK(monsters[0].health == 12);
     CHECK(q2_creature_world_summon(world, "Zone0Key") == 0);
     q2_zone_history_creatures(&history, "TEST", 1, sim, world);
     CHECK(!monsters[0].in_use && !monsters[0].population_active);
     CHECK(!monsters[1].dead && !monsters[1].population_active);
     CHECK(q2_zone_history_capture(&history, "TEST", 1, sim, world, NULL, NULL, 0) == Q2_OK);
     q2_zone_history_creatures(&history, "TEST", 0, sim, world);
-    CHECK(monsters[0].health == 13 && monsters[1].dead);
+    CHECK(monsters[0].health == 12 && monsters[1].dead);
     data[8] = 'x'; /* different Population must never inherit old objects */
     q2_sim_free(sim);
     q2_sim_init(sim, NULL, 50);
@@ -111,9 +129,10 @@ static void test_ambush_return(const char *disc_path)
             strcmp(g.name, "LiftRoom")) continue;
         group = m->group; slot = m->population_slot;
         q2_monster_damage(m, 1);
-        m->pos[0] += 3;
+        /* The record reads the actor's origin (+0x54), which is the motion's. */
+        m->pos[0] += 3; m->motion.ent.pos[0] += 3; m->motion.target[0] += 3;
         health = m->health;
-        memcpy(pos, m->pos, sizeof(pos));
+        memcpy(pos, q2_cre_origin(m), sizeof(pos));
         break;
     }
     CHECK(group != UINT32_MAX);
@@ -122,10 +141,15 @@ static void test_ambush_return(const char *disc_path)
     for (i = 0; i < c->creatures.set.count; i++) {
         const q2_monster *m = &c->creatures.set.monsters[i];
         if (m->group != group || m->population_slot != slot) continue;
-        CHECK(m->in_use && !m->spawn_pending && m->health == health);
+        /* GeneralRespawnStuffStore keeps health >> 2 (toward zero), so the
+         * wound comes back rounded to a multiple of four; the position goes
+         * through SpawnGeneral's box drop and lands on the same floor. */
+        printf("ambush return: health %d -> %d, pos %d %d %d -> %d %d %d\n", health,
+               m->health, pos[0], pos[1], pos[2], m->pos[0], m->pos[1], m->pos[2]);
+        CHECK(m->in_use && !m->spawn_pending && m->health == (health & ~3));
         CHECK(!memcmp(pos, m->pos, sizeof(pos)));
-        /* Captured before its first frame, it keeps the parked go. */
-        CHECK(m->think == q2_M_MoveFrame || m->think == q2_monster_go_think);
+        /* A fresh spawn: the go runs a frame after it (monster_start). */
+        CHECK(m->think == q2_monster_go_think && m->spawn_initialized);
         break;
     }
     CHECK(i < c->creatures.set.count);
@@ -147,6 +171,45 @@ static void capture(client *c, const char *dir, const char *name, const q2_camer
            c->cam.pos[0], c->cam.pos[1], c->cam.pos[2]);
     snprintf(path, sizeof(path), "%s/%s.ppm", dir, name);
     CHECK(psx_fb_write_ppm(q2_screen_front(&c->screen), path) == Q2_OK);
+}
+
+/* One creature, framed from a little above and in front of it, as the captures
+ * for a gate round trip want it: the pose is the subject, not the room. */
+static void capture_creature(client *c, const char *dir, const char *name, u32 index)
+{
+    const q2_monster *m = &c->creatures.set.monsters[index];
+    q2_camera camera = c->cam;
+    const s32 *at = q2_cre_origin(m);
+    /* Four stands around the creature; the first inside the hull is used. */
+    static const s32 side[4][3] = {{0, 0, 700}, {0, 0, -700}, {700, 0, 0}, {-700, 0, 0}};
+    static const s32 yaw[4] = {2048, 0, 1024, 3072};
+    u32 k;
+    if (!dir) return;
+    for (k = 0; k < 4; k++) {
+        camera.pos[0] = at[0] + side[k][0]; camera.pos[1] = at[1] - 450;
+        camera.pos[2] = at[2] + side[k][2];
+        camera.yaw = (s16)yaw[k]; camera.pitch = -200; camera.roll = 0;
+        if (!c->sim[0].coll_primary_ready ||
+            q2_coll_find_node(&c->sim[0].coll_primary, camera.pos, -1, true) >= 0) break;
+    }
+    capture(c, dir, name, &camera);
+}
+
+/* Put the actor's animation cursor where a live tick would have it for the AI
+ * frame the test chose, so a capture shows that frame rather than the seed. */
+static void pose_at_frame(client *c, u32 index)
+{
+    q2_monster *m = &c->creatures.set.monsters[index];
+    const q2_cre_frame_name *rec;
+    u32 pos = 0;
+    if (!c->cre_model_ok || !c->cre_model_ok[index]) return;
+    rec = q2_creature_world_frame_name(&c->creatures, m, m->frame);
+    if (!rec || !q2_model_position_for_move(&c->cre_model[index], rec->name, m->frame,
+                                            rec->first, &pos)) return;
+    m->motion.anim_position = m->motion.anim_previous = (s16)pos;
+    m->motion.anim_base = (u16)pos & 0x7FFFu;
+    m->motion.anim_flags = 0;
+    m->motion.animation_ready = true;
 }
 
 static void test_return(const char *disc_path, const char *dir)
@@ -488,10 +551,11 @@ static void check_death_clip_frames(client *c, u32 index, const char *who,
      * What the disc shows for every named death move: the clip is exactly
      * Q2_CRE_TICKS_PER_FRAME (3) animation frames per AI frame, so the move's
      * last frame sits at animation frame 3n-3 and LastFrameFromSequenceNum
-     * answers 3n-1. The console's returning body is therefore two animation
-     * frames -- the tail of the last AI frame's interpolation -- further into
-     * the clip than the body the player walked away from; the port rests on
-     * 3n-3 on both sides of the gate. Pinned as the disc's arithmetic.
+     * answers the clip's last tick, in frame 3n-1. The console's returning
+     * body is therefore two animation frames -- the tail of the last AI
+     * frame's interpolation -- further into the clip than the body the player
+     * walked away from, and client_cre_pose_returned_body puts it there
+     * (check_death_clip). Pinned as the disc's arithmetic.
      */
     CHECK(!h1 && (u32)c1.frames == Q2_CRE_TICKS_PER_FRAME *
                                (u32)(mv->last_frame - mv->first_frame + 1));
@@ -499,11 +563,37 @@ static void check_death_clip_frames(client *c, u32 index, const char *who,
                  Q2_CRE_TICKS_PER_FRAME - 1u);
 }
 
+/* LastFrameFromSequenceNum (0x8006DAB4) for the clip a frame's position is in:
+ * the clip lengths through it, in tenths, minus one -- the clip's last tick. */
+static bool clip_end_tick(client *c, u32 index, s32 frame, u32 *out)
+{
+    const q2_monster *m = &c->creatures.set.monsters[index];
+    const q2_model *mdl = &c->cre_model[index];
+    const q2_cre_frame_name *rec = q2_creature_world_frame_name(&c->creatures, m, frame);
+    q2_model_anim clip;
+    u32 pos = 0, within = 0;
+    bool held = false;
+    if (!rec || !c->cre_model_ok || !c->cre_model_ok[index] ||
+        !q2_model_position_for_move(mdl, rec->name, frame, rec->first, &pos) ||
+        !q2_model_anim_at_position_held(mdl, pos, &clip, &within, &held)) return false;
+    *out = q2_model_anim_base(mdl, &clip) + (u32)clip.frames * Q2_MODEL_TICKS_PER_FRAME - 1u;
+    return true;
+}
+
 static void check_death_clip(client *c, u32 index, s32 died_frame)
 {
     const q2_monster *m = &c->creatures.set.monsters[index];
+    u32 end = 0;
     CHECK(m->currentmove && c->cre_model_ok && c->cre_model_ok[index]);
     check_death_clip_frames(c, index, "corpse", m->currentmove, died_frame);
+    /* RespawnQuakeDeadBody, 0x8007D748..0x8007D75C: the body's +0x100 is the
+     * clip's last tick, two animation frames and nine tenths past where the
+     * move's last AI frame left the cursor (3n-3 frames, tick 30n-30). */
+    CHECK(clip_end_tick(c, index, m->frame, &end));
+    printf("corpse pose: frame %d, cursor %d, clip end %u\n", m->frame,
+           m->motion.anim_position, end);
+    CHECK(m->motion.animation_ready && m->motion.anim_position == (s16)end);
+    CHECK(m->motion.anim_flags == 0);
 }
 
 /* Every named death move of every module resident in this zone, from its
@@ -603,7 +693,12 @@ static void test_runtime_return(const char *disc, const char *dir)
             q2_monster_damage_reaction(m, NULL, 30); /* dying, not gibbed */
         }
         CHECK(m->currentmove != NULL);
-        if (m->currentmove) m->frame = (s16)(m->currentmove->first_frame + 1);
+        /* The attacker halfway through its attack, the other one frame into
+         * its fall; the display cursor follows (capture_creature shows it). */
+        if (m->currentmove)
+            m->frame = (s16)(n == 0 ? (m->currentmove->first_frame + m->currentmove->last_frame) / 2
+                                    : m->currentmove->first_frame + 1);
+        pose_at_frame(c, i);
         m->next_think = q2_level_state.time + 4;
         m->attack_finished = q2_level_state.time + 9;
         m->pain_debounce = q2_level_state.time + 6;
@@ -633,6 +728,8 @@ static void test_runtime_return(const char *disc, const char *dir)
     camera.pos[0] = anchor[0]; camera.pos[1] = anchor[1] - 300; camera.pos[2] = anchor[2] + 1200;
     camera.yaw = 2048; camera.pitch = -160; camera.roll = 0;
     capture(c, dir, "before-zone-change", &camera);
+    capture_creature(c, dir, "attacker-before-gate", indices[0]);
+    capture_creature(c, dir, "dying-before-gate", indices[1]);
     for (i = 0; i < 2; i++) {
         q2_monster *m = &c->creatures.set.monsters[indices[i]];
         /* Two display samples between AI ticks; retain the fractional pose. */
@@ -708,25 +805,40 @@ static void test_runtime_return(const char *disc, const char *dir)
             CHECK(p->expires == shots[5].expires && !memcmp(p->vel, shots[5].vel, sizeof(p->vel)));
         }
         /*
-         * The attacker resumes its live move. That is the port's design, not
-         * the console's: GeneralRespawnStuffStore (0x8007D318) keeps position,
-         * health, yaw, target and spawn flags, and the returning creature is
-         * spawned afresh. Pinned as it stands; not a parity claim.
+         * The attacker is a FRESH SPAWN. GeneralRespawnStuffStore (0x8007D318)
+         * kept its class, position, yaw >> 6, health >> 2, nine spawn-flag
+         * bits and target; GeneralRespawnStuff (0x8007D158) handed that to
+         * SpawnGeneral (0x800565C4) and wrote the health again after export 0
+         * (0x8007D304). Its attack move, frame, deadlines, enemy and display
+         * cursor did not cross the gate; monster_start parked the go think a
+         * frame ahead, as it does for any spawn.
          */
         m = authored_creature(c, group[0], slot[0], &index);
         CHECK(m && m->in_use && !m->dead);
         if (m) {
+            const q2_monster *was = &creature[0].creature.state;
+            printf("attacker return: health %d -> %d, yaw %d -> %d, frame %d -> %d, "
+                   "think %s, next %d (level %d)\n", was->health, m->health,
+                   was->angles[2], m->angles[2], was->frame, m->frame,
+                   m->think == q2_monster_go_think ? "go" : "other",
+                   m->next_think, q2_level_state.time);
+            CHECK(m->health == (was->health & ~3) && m->health != was->health);
+            CHECK(m->angles[2] == (was->angles[2] & 0xFC0) && m->ideal_yaw == m->angles[2]);
+            CHECK(m->pos[0] == was->pos[0] && m->pos[2] == was->pos[2]);
+            CHECK(m->spawnflags == was->spawnflags);
+            CHECK(m->spawn_initialized && !m->resume_pending);
+            CHECK(m->think == q2_monster_go_think && m->next_think == q2_level_state.time + 1);
+            CHECK(m->enemy == NULL && m->goalentity == NULL && m->oldenemy == NULL);
+            CHECK(m->attack_finished == 0 && m->pain_debounce == 0);
+            CHECK(!(m->aiflags & Q2_AI_HOLD_FRAME));
+            CHECK(m->frame != was->frame);
             CHECK(q2_zone_capture_monster(&actual, &c->creatures, m));
-            CHECK(actual.creature.move_offset == creature[0].creature.move_offset &&
-                  !strcmp(actual.creature.move_module, creature[0].creature.move_module));
-            CHECK(m->frame == creature[0].creature.state.frame);
-            CHECK(m->next_think == creature[0].creature.state.next_think + 100);
-            CHECK(m->attack_finished == creature[0].creature.state.attack_finished + 100);
-            CHECK(m->enemy == &c->creatures.sight && m->goalentity == &c->creatures.sight);
-            CHECK(m->aiflags == creature[0].creature.state.aiflags);
-            CHECK(c->cre_anim[index].cursor.position == animation[0].cursor.position &&
-                  c->cre_anim[index].cursor.target == animation[0].cursor.target &&
-                  c->cre_anim[index].cursor.ready == animation[0].cursor.ready);
+            CHECK(actual.creature.move_offset != creature[0].creature.move_offset ||
+                  strcmp(actual.creature.move_module, creature[0].creature.move_module) ||
+                  !actual.creature.has_move);
+            /* Nothing of the live cursor came back either. */
+            CHECK(!c->cre_anim[index].cursor.ready || !animation[0].cursor.ready ||
+                  c->cre_anim[index].cursor.position != animation[0].cursor.position);
         }
         /*
          * The one caught dying was finished by FinishDying (0x8007F630): a
@@ -752,22 +864,37 @@ static void test_runtime_return(const char *disc, const char *dir)
         }
     }
     capture(c, dir, "after-zone-return", &camera);
-    /* The attacker's move still runs; the body's does not (the corpse tick
-     * drives it from here, as 0x8007F71C does on the console). */
     {
+        u32 index = 0;
+        if (authored_creature(c, group[0], slot[0], &index))
+            capture_creature(c, dir, "attacker-after-return", index);
+        if (authored_creature(c, group[1], slot[1], &index))
+            capture_creature(c, dir, "corpse-after-return", index);
+    }
+    /* The attacker's parked go installs its stand and runs from there; the
+     * body's cursor does not move (the corpse tick drives it from here, as
+     * 0x8007F71C does on the console, and a drawn frame leaves it alone). */
+    {
+        u32 index = 0, end = 0;
         q2_monster *m = authored_creature(c, group[0], slot[0], NULL);
-        if (m && m->currentmove) {
-            const q2_mmove *move = m->currentmove;
-            s16 frame = m->frame;
-            m->aiflags &= ~Q2_AI_HOLD_FRAME;
-            q2_M_MoveFrame(m);
-            CHECK(m->frame != frame || m->currentmove != move);
+        if (m && m->think == q2_monster_go_think) {
+            m->think(m);
+            CHECK(m->currentmove != NULL && m->think == q2_M_MoveFrame);
+            if (m->currentmove) {
+                const q2_mmove *move = m->currentmove;
+                s16 frame = m->frame;
+                CHECK(m->frame >= move->first_frame && m->frame <= move->last_frame);
+                q2_M_MoveFrame(m);
+                CHECK(m->frame != frame || m->currentmove != move);
+            }
         }
-        m = authored_creature(c, group[1], slot[1], NULL);
+        m = authored_creature(c, group[1], slot[1], &index);
         if (m && m->currentmove) {
-            s16 frame = m->frame;
+            s16 frame = m->frame, cursor = m->motion.anim_position;
+            CHECK(clip_end_tick(c, index, frame, &end) && cursor == (s16)end);
             q2_monster_corpse_tick(m);
             CHECK(m->frame == frame && m->in_use && m->corpse);
+            CHECK(m->motion.anim_position == cursor && m->motion.animation_ready);
         }
     }
     /* Detached corpses have their own dissolve timer and callback policy. */

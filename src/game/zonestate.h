@@ -1,8 +1,11 @@
 /* Population state retained by OnLeavingZone / OnEnteringZone.
  * Retail saves objects at 0x800569C8 and group flags at 0x80056F8C.
- * Native records keep full coordinate/health precision and authored identities;
- * runtime slots are not cross-zone identities. Models, collision nodes and
- * live references are rebound against the destination's resources. */
+ * A living creature's record is the console's (GeneralRespawnStuffStore,
+ * 0x8007D318, decoded as GeneralRespawnStuff 0x8007D158 decodes it) and its
+ * return is a fresh spawn; dead bodies carry their runtime. Authored identities
+ * key the records; runtime slots are not cross-zone identities. Models,
+ * collision nodes and live references are rebound against the destination's
+ * resources. */
 #ifndef Q2PSX_ZONE_STATE_H
 #define Q2PSX_ZONE_STATE_H
 #include "q2psx.h"
@@ -68,6 +71,16 @@ typedef struct q2_zone_runtime {
     };
 } q2_zone_runtime;
 
+/*
+ * For a creature, `health`, `yaw`, `target`, `pos` and `spawnflags` are the
+ * console's record as GeneralRespawnStuff (0x8007D158) decodes it, written by
+ * `store_living_record` (zonestate.c): yaw rounded down to 64 units, health a
+ * multiple of four toward zero in the 12-byte form, the target masked to eight
+ * bits, and `spawnflags` the eleven-bit record field -- the edict's nine bits
+ * (+0x1C >> 18) in bits 0..8 and the Population record's 0x600 (+0xF2) -- not
+ * the edict word. ZPOP files before version 7 hold the edict word here and are
+ * converted on read. A body keeps full precision, since its runtime comes back.
+ */
 typedef struct q2_zone_object {
     u32 group, slot;
     s32 zone;
@@ -116,10 +129,22 @@ void q2_zone_history_free(q2_zone_history *h);
  * is left where the death move had it; QuakeStoreInanimate (0x80059B08) stores
  * the CLIP that frame is in (FindAnimSequenceNumFromFrame, 0x8006DA3C, at
  * 0x80059BC4) and RespawnQuakeDeadBody (0x8007D558) poses the returning body on
- * that clip's last frame (LastFrameFromSequenceNum, 0x8006DAB4, at 0x8007D748)
- * with the corpse handler installed (0x8007D6E8) and no edict. The port's
- * corpse rests on its move's last frame, which is the same pose wherever a
- * death move is one clip (tests/test_client_zones.c checks the disc's).
+ * that clip's last tick: LastFrameFromSequenceNum (0x8006DAB4, at 0x8007D748)
+ * sums the clip lengths through it -- in the tenths BodgeAnimData scaled them
+ * to, the unit of +0x100 -- and subtracts one, and 0x8007D75C writes that into
+ * the body's +0x100, with the corpse handler installed (0x8007D6E8) and no
+ * edict. The port's body comes back with its frame on the move's last AI frame
+ * and its animation cursor on that tick (client_cre_pose_returned_body), two
+ * animation frames further than the last AI frame on every death clip the
+ * disc has (tests/test_client_zones.c measures them).
+ *
+ * A LIVING creature's +0x18 hook is GeneralRespawnStuffStore (0x8007D318),
+ * which keeps class, position, yaw >> 6, health, nine spawn-flag bits with the
+ * record's 0x600, and the target; GeneralRespawnStuff (0x8007D158) turns it
+ * back into a spawn record for SpawnGeneral (0x800565C4) -- a fresh spawn --
+ * and writes the stored health after export 0 (0x8007D304). The port stores
+ * that record (store_living_record) and spawns afresh on return
+ * (q2_zone_history_creatures, then q2_zone_history_spawned after the wake).
  *
  * Then SaveCreatures (0x800569C8) calls each live slot's class-table +0x1C
  * hook (0x80056B74..0x80056B88). Table 0x800A3368: creatures, pickups (46)
@@ -146,9 +171,15 @@ q2_result q2_zone_history_capture(q2_zone_history *h, const char *map, int zone,
                                   const q2_zone_animation *animation, u32 phase_us);
 void q2_zone_history_items(const q2_zone_history *h, const char *map, int zone,
                             struct q2_sim *sim, const q2_model_bank *zone_bank);
-void q2_zone_history_creatures(const q2_zone_history *h, const char *map,
+/* Before the wake: places every surviving record. A living creature's runtime,
+ * if a cold save left one, is consumed here -- the console's record has none. */
+void q2_zone_history_creatures(q2_zone_history *h, const char *map,
                                 int zone, struct q2_sim *sim,
                                 struct q2_creature_world *world);
+/* After the wake has run export 0 and monster_start: the stored health again,
+ * as GeneralRespawnStuff writes it over SpawnGeneral's result (0x8007D304). */
+void q2_zone_history_spawned(const q2_zone_history *h, const char *map,
+                             struct q2_sim *sim, struct q2_creature_world *world);
 void q2_zone_history_resume(q2_zone_history *h, const char *map, int zone,
                              struct q2_sim *sim, struct q2_creature_world *world,
                              q2_actor *actors, q2_zone_animation *animation,
