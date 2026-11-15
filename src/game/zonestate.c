@@ -284,7 +284,7 @@ static void store_living_record(q2_zone_object *o, const q2_creature_world *w,
         o->health = (s16)(quarter * 4);
     } else {
         memcpy(o->pos, pos, sizeof(o->pos));
-        o->health = h;
+        o->health = (s16)h;     /* `lhu` +0x108, `sh` into the record */
     }
     o->yaw = q2_cre_yaw(m) & 0xFC0;
     if (!target && m->movetarget && m->movetarget->class_id == Q2_CLASS_PATH_CORNER)
