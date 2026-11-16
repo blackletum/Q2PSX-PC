@@ -1013,7 +1013,8 @@ static void test_wheel_notches_per_tick(void)
 }
 
 /* A respawn is a fresh entity at full light, and a grenade primed in a hand
- * that died goes off on its own fuse instead of in the next life. */
+ * that died is freed with no blast (0x8004A398, 0x8004A96C) instead of going
+ * off in the next life. Its fuse is long, so only the removal can clear it. */
 static void test_respawn_light_and_dead_hand_grenade(void)
 {
     client *c = fixture(2);
@@ -1035,12 +1036,19 @@ static void test_respawn_light_and_dead_hand_grenade(void)
     p->pos[2] = c->sim[0].player[1].pos[2];
     p->damage = 120;
     p->splash_radius = Q2_SPLASH_RADIUS_GRENADE;
-    p->expires = c->sim[0].level_time + 1;
+    p->expires = c->sim[0].level_time + Q2_HAND_GRENADE_FUSE;
     c->sim[0].player[1].ent2_flags |= Q2_ENT2_DEAD;
+    c->hg_release_pending[1] = true;
     CHECK(q2_projectile_hand_held_index(&c->sim[0].combat.projectiles, 1) >= 0);
-    client_input_simulated(c, 1.0f / 30.0f);
-    client_input_simulated(c, 1.0f / 30.0f);
-    CHECK(q2_projectile_hand_held_index(&c->sim[0].combat.projectiles, 1) < 0);
+    {
+        u32 fused = q2_sim_proj_scan.expired;
+        client_input_simulated(c, 1.0f / 30.0f);
+        client_input_simulated(c, 1.0f / 30.0f);
+        CHECK(q2_projectile_hand_held_index(&c->sim[0].combat.projectiles, 1) < 0);
+        CHECK(!c->sim[0].combat.projectiles.p[0].in_use);
+        CHECK(q2_sim_proj_scan.expired == fused);
+        CHECK(!c->hg_release_pending[1]);
+    }
     release_fixture(c);
 }
 

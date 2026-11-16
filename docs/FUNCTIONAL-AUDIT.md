@@ -2491,14 +2491,15 @@ vectors. The folded order got 7,111 of them wrong; 1,766 survive the `>> 2`,
 110 change a stored offset and 5 a drift. 40-frame headless WASTE2 rail
 captures are pixel-identical before and after on both discs.
 
-**Found while correcting it, not corrected.** The think's first lines free a
-held grenade whose owner is dead: 0x8004A398 `lh v0, 264(s3)` reads the owner's
-health, a non-positive value clears s3 (0x8004A3A0, 0x8004A3BC), and with s3
-clear any state but 3 reaches KillModel (0x8004A3D4 to 0x8004A96C, 0x8006D280)
-with no blast. The 16 November split-screen fix (`f196a4d`) instead lets a
-corpse's grenade go off on its own fuse, and the brief for this correction
-asked for that to be kept, so `q2_sim_hand_grenade_dead` keeps it. By this
-reading the console makes no blast at all.
+**Found while correcting it, and corrected after.** The think's first lines
+free a held grenade whose owner is dead: 0x8004A398 `lh v0, 264(s3)` reads the
+owner's health, a non-positive value clears s3 (0x8004A3A0, 0x8004A3BC), and
+with s3 clear any state but 3 reaches KillModel (0x8004A3D4 to 0x8004A96C,
+0x8006D280) with no blast. The 16 November split-screen fix (`f196a4d`) had
+let a corpse's grenade go off on its own fuse instead. `q2_sim_hand_grenade_dead`
+now frees it with no blast on the corpse branch's first tick. The client also
+drops a 411 throw still pending, so it cannot release the next life's first
+grenade.
 
 **The zone-return creature fixtures.** The disc-backed `test_client_creatures`
 still expected a same-zone rebuild to carry a living creature's pending motion,

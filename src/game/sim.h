@@ -2173,11 +2173,11 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
  * takes 0x8004AA1C's reset (q2_vw_hand_grenade_expired). Drains it. */
 bool q2_sim_take_hand_expiry_reset(q2_sim *sim, int player);
 
-/* A held grenade in the hand of a player whose think has stopped (a corpse):
- * no position, cook or release reaches it. The 16 November behaviour: it
- * goes off where the hand last was once its fuse has elapsed. Returns
- * EXPIRED when it went off, HELD while it waits, NONE with no grenade. */
-q2_hand_grenade_update q2_sim_hand_grenade_dead(q2_sim *sim);
+/* A held grenade (state 1, or 2 before its release) in the hand of a player
+ * whose health has fallen: Grenade3's think finds its owner dead and frees it
+ * through KillModel with no blast (0x8004A398..0x8004A3D4, 0x8004A96C).
+ * Returns whether there was one to remove. */
+bool q2_sim_hand_grenade_dead(q2_sim *sim);
 
 /*
  * The rail's spiral from `start` to `end` (q2_fx_rail_trail), turned by the

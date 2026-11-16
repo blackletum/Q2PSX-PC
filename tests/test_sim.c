@@ -3384,8 +3384,9 @@ static void test_held_hand_grenade(void)
         }
     }
 
-    /* A corpse's grenade: no position, cook or release reaches it, and it
-     * goes off in place once the fuse has run out (16 November). */
+    /* A corpse's grenade: Grenade3's think finds its owner dead and frees it
+     * through KillModel, fuse or no fuse, with no blast (0x8004A398..
+     * 0x8004A3D4, 0x8004A96C). */
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
     sim.fire_from_input = false;
@@ -3396,14 +3397,17 @@ static void test_held_hand_grenade(void)
     h = q2_projectile_hand_held_index(&sim.combat.projectiles, 0);
     check(h >= 0, "a held grenade for the dead hand");
     if (h >= 0) {
-        check_eq_i(q2_sim_hand_grenade_dead(&sim), Q2_HAND_GRENADE_HELD,
-                   "a dead hand's grenade waits for its fuse");
+        u32 fused = q2_sim_proj_scan.expired;
+
         sim.level_time = sim.combat.projectiles.p[h].expires;
-        check_eq_i(q2_sim_hand_grenade_dead(&sim), Q2_HAND_GRENADE_EXPIRED,
-                   "and goes off when it runs out");
-        check_eq_i(sim.combat.projectiles.live, 0, "where the hand was");
+        check(q2_sim_hand_grenade_dead(&sim),
+              "a dead hand's grenade is removed, even with its fuse spent");
+        check_eq_i(sim.combat.projectiles.live, 0, "and is gone");
+        check_eq_i(q2_sim_proj_scan.expired - fused, 0, "without going off");
+        check_eq_i(sim.combat.inv.health, 100, "so it hurts nobody");
         check_eq_i(sim.combat.inv.ammo[Q2_AMMO_GRENADES], 3,
                    "never thrown, so never spent");
+        check(!q2_sim_hand_grenade_dead(&sim), "and there is nothing left");
     }
 }
 

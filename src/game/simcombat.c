@@ -2208,44 +2208,38 @@ static void projectile_owner_splash(q2_sim *sim, const q2_projectile *p,
         q2_actor_to_player(owner, &sim->combat.inv);
 }
 
-/* The fireball where the hand last was: a corpse's grenade, whose fuse runs
- * out with nothing left to throw it (q2_sim_hand_grenade_dead). */
-static void hand_grenade_burst_in_hand(q2_sim *sim, s32 index)
-{
-    q2_projectile *p = &sim->combat.projectiles.p[index];
-    q2_actor **targets = sim->world_targets ? sim->world_targets
-                                            : sim->combat.targets;
-    u32 count = sim->world_targets ? sim->world_target_count
-                                   : sim->combat.target_count;
-    s32 where[3];
+static void proj_slot_release(q2_sim *sim, u32 index);
 
-    player_damage_begin(sim);
-    memcpy(where, p->pos, sizeof(where));
-    projectile_owner_splash(sim, p, where, targets, count);
-    q2_projectile_detonate_traced(&sim->combat.projectiles, (u32)index,
-                                  attacker_for(sim, p->owner), targets,
-                                  count, &sim->combat.rules,
-                                  splash_clear, sim);
-    projectile_explosion(sim, p->kind, where);
-    player_damage_end(sim);
-}
-
-q2_hand_grenade_update q2_sim_hand_grenade_dead(q2_sim *sim)
+/*
+ * A HELD GRENADE DIES WITH ITS OWNER, AND MAKES NO BLAST. Grenade3's think
+ * opens by reading its owner (+0x2E4): 0x8004A398 `lh v0, 264(s3)` is the
+ * owner's health, and 0x8004A3A0 `blez` sends a non-positive one to
+ * 0x8004A3B8, which clears s3 in the delay slot of `j 0x8004A3C4` (as an
+ * owner whose +0xF4 reads zero also does, 0x8004A3B0). With s3 clear, any
+ * state but 3, the flight, branches at 0x8004A3D4 to 0x8004A96C: KillModel
+ * (0x8006D280) and the exit. Neither the fuse, nor the release, nor the
+ * radius damage is reached, so states 1 and 2 (held, and thrown at 411 but
+ * not yet released) just vanish.
+ *
+ * The 16 November fix (f196a4d) stopped the stale grenade going off at the
+ * next spawn by letting it run out its fuse at the body instead, which made
+ * a blast the console never makes. It is removed now, on the first think the
+ * corpse branch gives it, the think the console's own runs after the owner's
+ * health falls.
+ */
+bool q2_sim_hand_grenade_dead(q2_sim *sim)
 {
     s32 index;
-    q2_projectile *p;
 
     if (!sim)
-        return Q2_HAND_GRENADE_NONE;
+        return false;
     index = q2_projectile_hand_held_index(&sim->combat.projectiles,
                                           sim->cur_player);
     if (index < 0)
-        return Q2_HAND_GRENADE_NONE;
-    p = &sim->combat.projectiles.p[index];
-    if (!p->expires || sim->level_time < p->expires)
-        return Q2_HAND_GRENADE_HELD;
-    hand_grenade_burst_in_hand(sim, index);
-    return Q2_HAND_GRENADE_EXPIRED;
+        return false;
+    (void)q2_projectile_expire(&sim->combat.projectiles, (u32)index);
+    proj_slot_release(sim, (u32)index);
+    return true;
 }
 
 bool q2_sim_take_hand_expiry_reset(q2_sim *sim, int player)

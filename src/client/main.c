@@ -13828,16 +13828,19 @@ static void client_input_simulated(client *c, float dt)
             } else if (ticked) {
                 /*
                  * BUT A PRIMED GRENADE IS NOT THE GUN. Grenade3 is an entity
-                 * with a think of its own (0x8004A414), not part of the
-                 * player think the corpse think replaced, so its fuse keeps
-                 * burning in a dead hand and goes off where the hand last
-                 * was. The port only fed it from the view-weapon driver above:
-                 * a player killed holding one never exploded, and the stale
-                 * grenade, fuse long spent, blew up in their hand on the first
-                 * tick of their next life, at the spawn point, as a suicide.
-                 * No cook and no release: neither reaches a corpse.
+                 * with a think of its own (0x8004A368), not part of the
+                 * player think the corpse think replaced, and that think's
+                 * first test is its owner's health (0x8004A398): with the
+                 * owner dead, a grenade still held is freed with no blast
+                 * (q2_sim_hand_grenade_dead). The port used to feed it only
+                 * from the view-weapon driver above, so the stale grenade,
+                 * fuse long spent, blew up on the first tick of the next
+                 * life, at the spawn point, as a suicide. A 411 throw still
+                 * pending dies with it, so it cannot release the next life's
+                 * first grenade.
                  */
                 (void)q2_sim_hand_grenade_dead(&c->sim[0]);
+                c->hg_release_pending[pi] = false;
             }
             if (ticked && c->death[pi].stage == Q2_PDEATH_ALIVE &&
                 c->sim[0].combat.inv.health > 0)
