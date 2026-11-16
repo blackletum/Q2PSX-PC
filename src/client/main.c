@@ -467,6 +467,18 @@ typedef struct client {
     q2_gamepads     gamepads;
     bool            gamepad_player_one;
     SDL_JoystickID  primary_pad_id;
+    /* Host slots whose pad left mid-game and is still owed back, and the slot
+     * the NO CONTROLLER page is waiting on. GameCheckPaused asks every player
+     * every frame (0x8003E6C4..0x8003E6F4), so a second pad that left while
+     * the page was up for the first is asked for as soon as the first returns. */
+    u8              pad_lost;
+    int             reinsert_slot;
+    /* Player one's style per controller class (+1; 0 = never chosen), and the
+     * class it was last clamped for. Player one has one style word for three
+     * classes, so a pad leaving and coming back, or the PLAYERS page handing
+     * player one the keyboard, must not cost the style chosen for the pad. */
+    s8              p1_style_saved[3];
+    s8              p1_style_class;
     q2_mp_results   mp_results;
     double          mp_results_dt_frac;
     u32             mp_results_prev[Q2_MP_MAX_PLAYERS];
@@ -5651,6 +5663,12 @@ static bool client_mp_respawn(client *c, int pi)
         c->sim[0].combat.inv = c->mp_start_inv;
         if (++c->player_audio_generation[pi] == 0) ++c->player_audio_generation[pi];
         q2_sim_spawn(&c->sim[0], feet, c->mp_view_yaw[pi]);
+        /* 0x8003B250 builds the new player through the allocator, whose
+         * 0x8006C1B8 writes 4096 into entity+0xFC. q2_sim_spawn reuses the
+         * slot and clears the teleport fade bits without the light they were
+         * ramping, so a player killed mid-fade came back dark and stayed so:
+         * with the bits gone, nothing ever brightened them again. */
+        c->sim[0].player[pi].light = Q2_LIGHT_ONE;
         q2_sim_player_loadout(&c->sim[0], pi, &c->mp_start_inv,
                               c->mp_start_weapon);
         client_grant_all_weapons(c, pi);
@@ -6410,6 +6428,24 @@ static void client_event_explosive(void *user, const q2_event_item *item)
  * overlay draws in. A split-screen view centres its own half instead; the
  * console has neither a second screen nor a second string table.
  */
+/*
+ * The space a line for player one's overlay is laid out in. q2_hud_centre and
+ * q2_hud_need_key bake their position into the string, and a split draws
+ * `hud[0]` inside player one's own viewport with that viewport's context, so
+ * a line laid out at the full 512x248 centre landed at y 144 of a 123-line
+ * pane (clipped away in TWO_H and QUAD) or started at x 256 of a 255-wide one
+ * (wrapped after nine characters in TWO_V). One screen is the console's own
+ * space, which is what the single-screen draw centres.
+ */
+static void client_hud_line_ctx(const client *c, q2_hud_ctx *ctx)
+{
+    if (c->mp_enabled && c->screen.view_count > 1)
+        q2_hud_ctx_default(ctx, c->screen.native_view[0].w,
+                           c->screen.native_view[0].h);
+    else
+        q2_hud_ctx_default(ctx, Q2_HUD_SPACE_W, Q2_HUD_SPACE_H);
+}
+
 static void client_centre_line(client *c, const char *text)
 {
     q2_hud_ctx ctx;
@@ -6427,7 +6463,7 @@ static void client_centre_line(client *c, const char *text)
     if (c->sim[0].event_rt.initial_pass)
         return;
 
-    q2_hud_ctx_default(&ctx, Q2_HUD_SPACE_W, Q2_HUD_SPACE_H);
+    client_hud_line_ctx(c, &ctx);
     q2_hud_centre(&c->hud[0], &c->hud_tables, &ctx, text);
     c->centre_lines++;
 }
@@ -12883,16 +12919,18 @@ static void client_cycle_input(client *c, int pi, const q2_input *in)
     q2_sim_select_player(&c->sim[0], saved);
 }
 
-static void client_extra_camera(client *c, int pi)
+/* An extra viewport's death cam is player one's (below, in the frame): the
+ * same 0x8006FAC8 short-way ease toward -384 with the same `50 * dt` fraction
+ * of 0x800380D8, so every pane of a split tips its horizon at the console's
+ * rate. It used to pass a flat 100 per rendered frame, which is the fraction
+ * at about 144 fps and made a death in the second pane roll five times slower
+ * than the same death in the first at the port's own 1/30 s step. */
+static void client_extra_camera(client *c, int pi, s32 dt_ticks)
 {
     const q2_player *pl = &c->sim[0].player[pi];
     s32 *angles = c->mp_camera_angles[pi];
     if (pl->ent2_flags & Q2_ENT2_DEAD) {
-        s32 cur = angles[2] & 4095;
-        s32 d = ((-384 & 4095) - cur) & 4095;
-        if (!(d & 2048)) cur += (d * 100 + 2047) >> 11;
-        else cur -= ((4096 - d) * 100 + 2047) >> 11;
-        angles[2] = cur & 4095;
+        angles[2] = q2_pdeath_cam_roll((s16)(angles[2] & 0xFFF), dt_ticks) & 4095;
     } else {
         angles[0] = pl->pitch;
         angles[1] = pl->yaw;
@@ -13076,9 +13114,14 @@ static void client_input_simulated(client *c, float dt)
     }
 
     /* The wheel, onto the same two masks the weapon keys use, and into `raw`
-     * so a notch is latched by the same accumulator as a key. */
+     * so a notch is latched by the same accumulator as a key. A notch is taken
+     * only on a frame that ticks: `pend` ORs every frame of a tick together,
+     * so above the tick rate three queued notches (on, gap, on, gap, on inside
+     * one 40 ms tick) merged into one press and one weapon change. One notch
+     * per tick, with a quiet tick between, is one edge per notch. */
     {
-        int notch = client_wheel_notch(c);
+        int notch = (step != 0 && (!c->selfplay_active || sp_tick))
+                    ? client_wheel_notch(c) : 0;
 
         if (notch > 0)      raw |= (u16)bind.weapon_next;
         else if (notch < 0) raw |= (u16)bind.weapon_prev;
@@ -13765,8 +13808,29 @@ static void client_input_simulated(client *c, float dt)
              * a dead player's gun went on animating in his hands and could
              * still change weapon under him.
              */
-            if (ticked && !(c->sim[0].player[pi].ent2_flags & Q2_ENT2_DEAD))
+            if (ticked && !(c->sim[0].player[pi].ent2_flags & Q2_ENT2_DEAD)) {
                 client_advance_view_weapon(c, view_attack[pi], c->sim[0].cur_dt);
+            } else if (ticked) {
+                /*
+                 * BUT A PRIMED GRENADE IS NOT THE GUN. Grenade3 is an entity
+                 * with a think of its own (0x8004A414), not part of the
+                 * player think the corpse think replaced, so its fuse keeps
+                 * burning in a dead hand and goes off where the hand last
+                 * was. The port only fed it from the view-weapon driver above:
+                 * a player killed holding one never exploded, and the stale
+                 * grenade, fuse long spent, blew up in their hand on the first
+                 * tick of their next life, at the spawn point, as a suicide.
+                 * No cook and no release: neither reaches a corpse.
+                 */
+                s32 held = q2_projectile_hand_held_index(
+                    &c->sim[0].combat.projectiles, pi);
+                if (held >= 0) {
+                    s32 at[3];
+                    memcpy(at, c->sim[0].combat.projectiles.p[held].pos,
+                           sizeof(at));
+                    q2_sim_hand_grenade_update(&c->sim[0], at, 0, false);
+                }
+            }
             if (ticked && c->death[pi].stage == Q2_PDEATH_ALIVE &&
                 c->sim[0].combat.inv.health > 0)
                 client_player_anim_tick(c, pi, c->sim[0].cur_dt, false);
@@ -14184,18 +14248,19 @@ static void client_input_simulated(client *c, float dt)
              * HUD. Player 0's HUD, because player 0's inventory is what the
              * tick above gated the lock on.
              *
-             * DEVIATION: the line is laid out in the console's own 512x248
-             * space, which is exactly what the single-screen draw uses
-             * (q2_hud_ctx_centre_in). In split-screen the overlay is built per
-             * view, so a prompt raised here sits at the full-width centre
-             * rather than that view's — there is no console behaviour to match,
-             * since the console has one screen and one key inventory.
+             * DEVIATION: on one screen the line is laid out in the console's
+             * own 512x248 space, which is exactly what the single-screen draw
+             * uses (q2_hud_ctx_centre_in). In a split it goes to player one's
+             * overlay, which is drawn inside player one's viewport, so it is
+             * laid out in that viewport (client_hud_line_ctx). There is no
+             * console behaviour to match: the console has one key inventory
+             * and no campaign split.
              */
             {
                 u32 mi;
                 q2_hud_ctx kctx;
 
-                q2_hud_ctx_default(&kctx, Q2_HUD_SPACE_W, Q2_HUD_SPACE_H);
+                client_hud_line_ctx(c, &kctx);
                 for (mi = 0; mi < c->movers.count; mi++) {
                     u16 need = q2_mover_take_key_request(&c->movers, mi);
 
@@ -14620,8 +14685,11 @@ static void client_input_simulated(client *c, float dt)
 
     if (c->mp_enabled) {
         int pi;
+        s32 dt_ticks = (s32)((double)dt * 300.0 + 0.5);
+
+        if (dt_ticks > Q2_SCREEN_DT_MAX) dt_ticks = Q2_SCREEN_DT_MAX;
         for (pi = 1; pi < c->mp.player_count; pi++)
-            client_extra_camera(c, pi);
+            client_extra_camera(c, pi, dt_ticks);
     }
     c->cam.pos[0] = eye[0];
     c->cam.pos[1] = eye[1];
@@ -14826,6 +14894,37 @@ static void client_input(client *c, float dt)
  * scancodes. That keeps the navigation rules — wrap, skip, press-versus-release
  * — exactly as they were read out of the executable.
  */
+/*
+ * The player a host pad slot belongs to, or -1 for a pad nobody plays with.
+ *
+ * In a match the slot IS the player (slot 0 is the keyboard's unless
+ * `--gamepad-player-one`), and GameCheckPaused scans for START only over the
+ * session's player count (0x8003E780..0x8003E7D0), so a spare fourth pad in a
+ * two-player match is not anybody's START. In single player every pad drives
+ * player one, whichever slot SDL put it in.
+ */
+static int client_slot_player(const client *c, int slot)
+{
+    if (slot < 0 || slot >= Q2_SIM_MAX_PLAYERS)
+        return -1;
+    if (!c->mp_enabled)
+        return 0;
+    return slot < c->mp.player_count ? slot : -1;
+}
+
+/*
+ * True when the keyboard and mouse may drive the menu that is up. They are
+ * player one's devices, and a match's pause page belongs to whoever paused:
+ * the front end's pad reader indexes the pad records by `Pauser`
+ * (0x8001A0E8..0x8001A110, 0x80019BF0) and only the pauser's START unpauses
+ * (0x8003E7E0..0x8003E828).
+ */
+static bool client_menu_player_one_owns(const client *c)
+{
+    return !c->mp_enabled || c->in_front_end || !c->menu.open ||
+           c->menu.pauser == 0;
+}
+
 static u16 client_menu_pad(client *c)
 {
     const bool *k;
@@ -14857,10 +14956,24 @@ static u16 client_menu_pad(client *c)
     }
 
     if (c) {
-        if (c->menu.page_id != Q2_PAGE_FRONT_PLAYERS)
-            pad |= q2_gamepads_menu(&c->gamepads);
+        if (c->menu.page_id != Q2_PAGE_FRONT_PLAYERS) {
+            if (c->mp_enabled && !c->in_front_end && c->menu.open) {
+                /* A match's pause page reads the pauser's pad record alone
+                 * (0x8001A0EC). Every slot is still drained, so a tap made on
+                 * someone else's pad while it was up does not land on the
+                 * next page that opens. */
+                int i;
+                for (i = 0; i < Q2_SIM_MAX_PLAYERS; i++) {
+                    u16 m = q2_gamepads_menu_player(&c->gamepads, i);
+                    if (i == c->menu.pauser)
+                        pad |= m;
+                }
+            } else {
+                pad |= q2_gamepads_menu(&c->gamepads);
+            }
+        }
         if (c->in_front_end && (pad & Q2_PAD_START)) pad |= Q2_PAD_CROSS;
-        if (c->headless) return pad;
+        if (c->headless || !client_menu_player_one_owns(c)) return pad;
     }
     k = SDL_GetKeyboardState(NULL);
     if (!k)
@@ -15238,6 +15351,18 @@ static void client_apply_input(client *c)
     bool want_mouse = !have_pad && c->settings.v[Q2_SET_USE_MOUSE] != 0;
     int  style;
     int  i;
+    int  cls = have_pad ? 1 : want_mouse ? 0 : 2;
+
+    /* Park the style chosen under the class being left and bring back the one
+     * last chosen under the class arriving, before the clamp below would
+     * replace it with that class's default. */
+    if (c->p1_style_class != 0 && c->p1_style_class - 1 != cls) {
+        c->p1_style_saved[c->p1_style_class - 1] =
+            (s8)(c->settings.v[Q2_SET_PAD_STYLE] + 1);
+        if (c->p1_style_saved[cls] > 0)
+            c->settings.v[Q2_SET_PAD_STYLE] = (s16)(c->p1_style_saved[cls] - 1);
+    }
+    c->p1_style_class = (s8)(cls + 1);
 
     if (have_pad) {
         c->settings.v[Q2_SET_PAD_CLASS] = 1;
@@ -20343,7 +20468,38 @@ static const char *client_pad_port_name(const client *c, int player)
  * OPTIONS, and the page they were on is exactly the thing they can no longer
  * drive.
  */
-static bool client_reinsert_open(client *c, int player)
+/* Whether the pad a lost slot owes is back. In a match it is that slot's own
+ * pad; in single player any pad will do, because every pad is player one's. */
+static bool client_pad_back(const client *c, int slot)
+{
+    int i;
+    if (c->mp_enabled)
+        return slot >= 0 && slot < Q2_SIM_MAX_PLAYERS && c->gamepads.id[slot] != 0;
+    for (i = 0; i < Q2_SIM_MAX_PLAYERS; i++)
+        if (c->gamepads.id[i])
+            return true;
+    return false;
+}
+
+/* Whether a pad that just left was somebody's controller. In a match, any
+ * slot inside the player count (slot 0 only has a pad to lose under
+ * `--gamepad-player-one`). In single player, the pad player one was using,
+ * i.e. the lowest occupied slot, and only when no other pad is left to take
+ * over: q2_gamepads_primary hands player one the next pad in line. */
+static bool client_pad_owed(const client *c, int slot)
+{
+    int i;
+    if (slot < 0 || slot >= Q2_SIM_MAX_PLAYERS)
+        return false;
+    if (c->mp_enabled)
+        return slot < c->mp.player_count;
+    for (i = 0; i < slot; i++)
+        if (c->gamepads.id[i])
+            return false;
+    return !client_pad_back(c, slot);
+}
+
+static bool client_reinsert_open(client *c, int player, int slot)
 {
     /* The screens that are not the pause menu and own the frame outright. A
      * film, the boot chain, the memory card and the front end all run with no
@@ -20359,6 +20515,7 @@ static bool client_reinsert_open(client *c, int player)
 
     client_menu_fill_stats(c);
     q2_menu_set_pauser(&c->menu, player);
+    c->reinsert_slot = slot;
     /* 0x8003E860's killallsounds, before the page. */
     client_voices_stop(c);
     q2_menu_open_reinsert(&c->menu, Q2_VIOLATION_PAD, player,
@@ -20377,18 +20534,57 @@ static bool client_reinsert_open(client *c, int player)
  */
 static void client_reinsert_poll(client *c)
 {
-    int player;
+    int player, slot;
 
     if (!q2_menu_reinsert_open(&c->menu))
         return;
 
     player = c->menu.violating_player;
+    slot   = c->reinsert_slot;
     if (player < 0 || player >= Q2_SIM_MAX_PLAYERS)
         return;
 
-    if (q2_menu_reinsert_poll(&c->menu, c->gamepads.id[player] == 0))
+    if (q2_menu_reinsert_poll(&c->menu, !client_pad_back(c, slot))) {
+        if (slot >= 0 && slot < Q2_SIM_MAX_PLAYERS)
+            c->pad_lost &= (u8)~(1u << slot);
         Q2_INFO("controller: player %d is back; the pause menu returns",
                 player + 1);
+    }
+}
+
+/*
+ * The other half of GameCheckPaused's per-frame scan: a pad still owed raises
+ * the NO CONTROLLER page whenever the game can show it. The removal event only
+ * records the debt. Asking every frame is what lets a second missing pad be
+ * asked for once the first is back, and lets a pad lost during a film or the
+ * memory card be asked for when that screen ends. The front end owes nothing:
+ * its own PLAYERS page holds a match until every pad is in.
+ */
+static void client_reinsert_check(client *c)
+{
+    int slot;
+
+    if (c->in_front_end) {
+        c->pad_lost = 0;
+        return;
+    }
+    if (!c->pad_lost || q2_menu_reinsert_open(&c->menu))
+        return;
+    for (slot = 0; slot < Q2_SIM_MAX_PLAYERS; slot++) {
+        int who;
+
+        if (!(c->pad_lost & (1u << slot)))
+            continue;
+        who = client_slot_player(c, slot);
+        if (who < 0 || client_pad_back(c, slot)) {
+            c->pad_lost &= (u8)~(1u << slot);
+            continue;
+        }
+        /* One page at a time, lowest player first, as the scan's loop order
+         * gives; a screen that cannot be paused leaves the debt for later. */
+        client_reinsert_open(c, who, slot);
+        return;
+    }
 }
 
 static void client_menu_frame(client *c)
@@ -20432,7 +20628,8 @@ static void client_menu_frame(client *c)
      * over and the cursor has to be there before the press is handed to the
      * engine.
      */
-    pad = client_menu_pointer(c, &c->menu);
+    /* The mouse is player one's too; another player's pause ignores it. */
+    pad = client_menu_player_one_owns(c) ? client_menu_pointer(c, &c->menu) : 0;
     pad |= client_menu_pad(c);
     /* A key-down, not a held key, so it is one frame of TRIANGLE: the engine
      * sees the press on this advance and the release on the next. */
@@ -20455,6 +20652,7 @@ static void client_menu_frame(client *c)
      * of the game.
      */
     if (c->mouse_right && !c->mouse_right_prev && c->menu.depth == 0 &&
+        client_menu_player_one_owns(c) &&
         (c->menu.page_id == Q2_PAGE_PAUSE_SP ||
          c->menu.page_id == Q2_PAGE_PAUSE_MP)) {
         client_menu_close(c);
@@ -24317,9 +24515,14 @@ no_window:
                  * (0x8003E850..0x8003E874). The pause menu is what the reinsert
                  * check hands back to afterwards, not what comes up now.
                  */
-                if (ev.type == SDL_EVENT_GAMEPAD_REMOVED &&
-                    (gp == 0 || (c.mp_enabled && gp < c.screen.view_count)))
-                    client_reinsert_open(&c, gp);
+                if (ev.type == SDL_EVENT_GAMEPAD_ADDED) {
+                    if (c.mp_enabled)
+                        c.pad_lost &= (u8)~(1u << gp);
+                    else
+                        c.pad_lost = 0;
+                } else if (client_pad_owed(&c, gp)) {
+                    c.pad_lost |= (u8)(1u << gp);
+                }
             }
             if (gp >= 0 && ev.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
                 ev.gbutton.button == SDL_GAMEPAD_BUTTON_START &&
@@ -24328,10 +24531,20 @@ no_window:
                 !c.boot_open && !c.mcard_open && !c.save_prompt_open && !c.mission_open &&
                 !c.briefing_open && !c.endmis_open && !c.credits_open &&
                 !q2_menu_reinsert_open(&c.menu)) {
-                if (c.menu.open) {
-                    client_menu_close(&c);
+                /* Pauser is the PLAYER whose pad pressed START (0x8003E890
+                 * stores the scan index), not the host slot SDL gave the pad:
+                 * in single player the one pad sits in slot 1 and is still
+                 * player one's. Only the pauser's START unpauses: the paused
+                 * arm reads that one record (0x8003E7E0). */
+                int who = client_slot_player(&c, gp);
+
+                if (who < 0) {
+                    /* A spare pad: not in the scan. */
+                } else if (c.menu.open) {
+                    if (who == c.menu.pauser)
+                        client_menu_close(&c);
                 } else {
-                    client_pause_open(&c, gp);
+                    client_pause_open(&c, who);
                 }
             }
             if (ev.type == SDL_EVENT_QUIT) {
@@ -24414,6 +24627,10 @@ no_window:
                     else if (!c.menu.open) {
                         /* Escape is player one's START, so player one paused. */
                         client_pause_open(&c, 0);
+                    }
+                    else if (!client_menu_player_one_owns(&c)) {
+                        /* Another player's pause: the keyboard is player
+                         * one's and neither unpauses nor steers it. */
                     }
                     else if (c.menu.depth == 0)
                         client_menu_close(&c);
@@ -24627,6 +24844,7 @@ no_window:
                 if (c.wheel_queue < -8) c.wheel_queue = -8;
             }
         }
+        client_reinsert_check(&c);
 
         if (c.press_at_frame > 0 && (s32)c.frame_index == c.press_at_frame) {
             /* What a real press would end: a self-play demo, or a film. */
