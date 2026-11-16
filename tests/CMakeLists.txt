@@ -232,6 +232,17 @@ target_link_libraries(test_combat PRIVATE
 
 add_test(NAME combat COMMAND test_combat)
 
+# The frame's actor list against the console's swap, appends and order
+# (fixtures/bump_list_reference.h).
+add_executable(test_bumplist test_bumplist.c)
+
+target_link_libraries(test_bumplist PRIVATE
+    q2psx_common
+    q2psx_game
+)
+
+add_test(NAME bump_list COMMAND test_bumplist)
+
 add_executable(test_save test_save.c)
 
 target_link_libraries(test_save PRIVATE

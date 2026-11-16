@@ -424,10 +424,18 @@ static void fx_hitscan_impact(q2_sim *sim, const s32 origin[3],
         return;
 
     if (victim >= 0) {
-        /* Flesh only: armour taking the whole hit is the case the HUD's damage
-         * flash also distinguishes. */
-        if (!dr || dr->taken > 0)
-            fx_at_area(sim, Q2_FX_BLOOD, at, area);
+        /*
+         * Whenever the sweep returned a body, whatever DoDamage made of it:
+         * AnyoneFireInstantBullet calls the blood spray 0x80048B64 straight
+         * after DoDamage (0x80048974..0x80048980) with no test between, and
+         * the spray's fifteen directions draw their 45 rand() values first
+         * (0x80048B9C..0x80048BD4). This used to bleed only when health was
+         * taken, which no shot told apart until a smashed corpse's entry,
+         * still on the next frame's actor list, began to stop rounds (JAIL2's
+         * attract run, record frame 261: two pellets, 90 draws).
+         */
+        (void)dr;
+        fx_at_area(sim, Q2_FX_BLOOD, at, area);
         /*
          * THE SECOND BURST IS GONE, and that is a correction rather than a trim.
          *
@@ -748,10 +756,31 @@ static bool player_aim_visible(void *user, const s32 start[3],
                         p->aim_view_valid ? p->aim_node : -1, point, &node);
 }
 
+/*
+ * A player's own shot candidates. FindPlayerTarget (0x80039EA4), the bullet
+ * (0x80048908) and the rail (0x80049304) read the frame's actor list; the
+ * shooter is on it and is the sweep's ignore entity. Without registered
+ * actors, the targets the owner set.
+ */
+static q2_actor **player_shot_list(q2_sim *sim, q2_actor **buf, u32 cap,
+                                   u32 *count)
+{
+    s32 n = q2_sim_bump_actors(sim, NULL, buf, cap);
+
+    if (n >= 0) {
+        *count = (u32)n;
+        return buf;
+    }
+    *count = sim->combat.target_count;
+    return sim->combat.targets;
+}
+
 void q2_sim_find_target(q2_sim *sim, s32 dt)
 {
     q2_player *p;
     s32 eye[3], angles[3], current, target, step;
+    q2_actor *buf[Q2_BUMP_LIST_MAX], **list;
+    u32 count;
     if (!sim || dt <= 0) return;
     p = &sim->player[sim->cur_player];
     if (p->aim_view_valid) memcpy(eye, p->aim_eye, sizeof(eye));
@@ -761,8 +790,9 @@ void q2_sim_find_target(q2_sim *sim, s32 dt)
      * attract run, record frame 198: the console's round climbs at y
      * -10077 where the port's fell at +9843). */
     angles[0] = p->pitch; angles[1] = p->yaw; angles[2] = p->roll;
-    q2_combat_find_target(eye, angles, &sim->combat.self, sim->combat.targets,
-                          sim->combat.target_count, player_aim_visible, sim,
+    list = player_shot_list(sim, buf, Q2_BUMP_LIST_MAX, &count);
+    q2_combat_find_target(eye, angles, &sim->combat.self, list,
+                          count, player_aim_visible, sim,
                           p->aim_direction, &p->aim_pitch);
     p->aim_ready = true;
     /* Seek halfword, 0x8006FE3C, with the caller's signed dt*4 halfword. */
@@ -815,6 +845,67 @@ void q2_sim_set_bodies(q2_sim *sim, const q2_move_body *bodies, u32 count)
         return;
     sim->extra_bodies      = bodies;
     sim->extra_body_count  = bodies ? count : 0;
+}
+
+void q2_sim_set_body_actors(q2_sim *sim, q2_actor *const *actors, u32 count)
+{
+    if (!sim)
+        return;
+    sim->body_actors      = actors;
+    sim->body_actor_count = actors ? count : 0;
+}
+
+s32 q2_sim_bump_actors(q2_sim *sim, q2_actor *player, q2_actor **out,
+                       u32 cap)
+{
+    u32 i, n = 0, ghosts = 0;
+
+    if (!sim || !sim->body_actors || !out)
+        return -1;
+
+    for (i = 0; i < sim->body_count && n < cap; i++) {
+        const q2_move_body *b = &sim->bodies[i];
+        const q2_bump_ref  *r = &sim->bump_read[i];
+        q2_actor *a = NULL;
+
+        /* Handed out again since its append (sim.c, sim_bump_ref_valid). */
+        if (!b->listed ||
+            (r->slot >= 0 && q2_obj_slot_serial(r->slot) != r->serial))
+            continue;
+        if (b->id <= -2) {
+            int slot = (int)(-b->id - 2);
+
+            if (slot >= Q2_SIM_MAX_PLAYERS)
+                continue;
+            a = slot == sim->cur_player
+                    ? (player ? player : &sim->combat.self)
+                    : &sim->pcombat[slot].self;
+        } else if (b->id >= 0 && (u32)b->id < sim->body_actor_count) {
+            a = sim->body_actors[b->id];
+            /*
+             * THE STALE POINTER. A corpse that appended itself and was then
+             * smashed (0x8007F740, then 0x8007CEB4's free at 0x8007D140) is
+             * still on this frame's list, and 0x800544EC reads the freed
+             * record as it was left: KillModel (0x8006D280) zeroes +0xF4 and
+             * nothing the sweep reads. So it is shot as the body it was, from
+             * a copy, because the port's actor says `absent` from the free on.
+             * What DoDamage then does to a freed record is not modelled; the
+             * copy takes it and is dropped.
+             */
+            if (a && a->absent && ghosts < Q2_BUMP_LIST_MAX) {
+                q2_actor *g = &sim->bump_ghost[ghosts++];
+
+                *g = *a;
+                g->absent = false;
+                a = g;
+            } else if (a && a->absent) {
+                a = NULL;
+            }
+        }
+        if (a)
+            out[n++] = a;
+    }
+    return (s32)n;
 }
 
 int q2_sim_weapon_after_pickup(const q2_sim *sim, const q2_inventory *inv,
@@ -1308,6 +1399,8 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
     s32 prev_next_fire;
     s32 launched;
     s32 spawn_node = Q2_PROJ_NODE_UNKNOWN;  /* FindNewSpaceFromOld, 0x80055020 */
+    q2_actor *shot_buf[Q2_BUMP_LIST_MAX], **shot_list;
+    u32 shot_count;
     u32 i;
 
     memset(&r, 0, sizeof(r));
@@ -1401,6 +1494,7 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
         q2_sim_player_noise(sim, 1, r.shot_count ? r.shot[0].origin : eye);
 
     player_damage_begin(sim); /* after the fire function spends ammunition */
+    shot_list = player_shot_list(sim, shot_buf, Q2_BUMP_LIST_MAX, &shot_count);
     switch (r.kind) {
     case Q2_FK_BULLET:
         /* Every pellet is its own trace, which is why a shotgun can catch two
@@ -1427,8 +1521,7 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
              * fraction. */
             victim = q2_combat_hitscan_to(&sim->combat.self, s->origin, stop,
                                           s->damage, Q2_MOD_BULLET,
-                                          sim->combat.targets,
-                                          sim->combat.target_count,
+                                          shot_list, shot_count,
                                           &sim->combat.rules, &dr, at);
             fx_hitscan_impact(sim, s->origin, s->dir, at,
                               victim < 0 && frac < 4096, frac_area,
@@ -1459,8 +1552,7 @@ q2_fire_result_v2 q2_sim_fire_weapon(q2_sim *sim, int weapon_id,
          */
         victim = q2_combat_hitscan_to(&sim->combat.self, s->origin,
                                       world_end, s->damage, Q2_MOD_RAIL,
-                                      sim->combat.targets,
-                                      sim->combat.target_count,
+                                      shot_list, shot_count,
                                       &sim->combat.rules, &dr, at);
         (void)victim;
         (void)frac_area;
@@ -1777,17 +1869,44 @@ q2_damage_result q2_sim_hurt_player(q2_sim *sim, q2_actor *attacker,
  * or -1 when the round hit only the world or nothing.
  */
 /*
- * A creature round's candidates: every body but the shooter (the sweep's
- * ignore argument) and then the player, at its entity origin. Returns the
- * count and writes the player's slot, -1 when the player is down.
+ * A creature round's candidates: the frame's actor list in its order, less the
+ * shooter (the sweep's ignore argument, 0x800545E8), with the current player
+ * as a copy at its entity origin. AnyoneFireInstantBullet, the rail, the laser
+ * and the mission laser all hand 0x800544EC the list at 0x800B2B90..0x800B2B98
+ * (0x80048908, 0x80049304, 0x80049A94, 0x80048F78), so a player who appended
+ * last frame is in it alive or dead, and twice if their corpse appended twice;
+ * the order decides which body a segment that starts inside two of them
+ * stops in, and where. `*player_slot` is the copy's first index, -1 if absent;
+ * callers test the hit by pointer, because a duplicate can be the one hit.
+ *
+ * With no actors registered (a library caller) the old list stands: every
+ * target but the shooter, then the player while alive.
  */
 static u32 hitscan_victims(q2_sim *sim, const q2_actor *attacker,
                            q2_actor **list, q2_actor *player,
                            s32 *player_slot)
 {
+    const s32 *feet = sim->player[sim->cur_player].pos;
     u32 n = 0, i;
+    s32 listed;
 
     *player_slot = -1;
+    if (sim->body_actors) {
+        q2_actor_from_player(&sim->combat.self, &sim->combat.inv, feet);
+        *player = sim->combat.self;
+        player->origin[1] = q2_sim_origin_y(feet[1]);
+        listed = q2_sim_bump_actors(sim, player, list,
+                                    Q2_SIM_CRE_HITSCAN_MAX + 1);
+        for (i = 0; listed > 0 && i < (u32)listed; i++) {
+            if (list[i] == attacker)
+                continue;
+            if (list[i] == player && *player_slot < 0)
+                *player_slot = (s32)n;
+            list[n++] = list[i];
+        }
+        return n;
+    }
+
     for (i = 0; i < sim->combat.target_count && n < Q2_SIM_CRE_HITSCAN_MAX;
          i++) {
         if (sim->combat.targets[i] && sim->combat.targets[i] != attacker &&
@@ -1796,8 +1915,6 @@ static u32 hitscan_victims(q2_sim *sim, const q2_actor *attacker,
     }
 
     if (sim->combat.inv.health > 0) {
-        const s32 *feet = sim->player[sim->cur_player].pos;
-
         q2_actor_from_player(&sim->combat.self, &sim->combat.inv, feet);
         *player = sim->combat.self;
         player->origin[1] = q2_sim_origin_y(feet[1]);
@@ -1856,7 +1973,7 @@ static s32 actor_hitscan(q2_sim *sim, q2_actor *attacker,
      * presentation and the blood keep sp+40's unprojected entry), so this
      * happens after `impact` is filled.
      */
-    if (idx >= 0 && idx == player_slot) {
+    if (idx >= 0 && list[idx] == &player) {
         /* Fired from a think, ahead of this frame's camera pass: the plane
          * the previous frame left (sim.h, `view_plane_prev`). */
         const q2_view_plane *vp = q2_sim_view_plane_prev_for(sim, sim->cur_player);
@@ -1934,7 +2051,7 @@ q2_cre_rail_result q2_sim_creature_rail(q2_sim *sim, q2_actor *attacker,
 
     n = hitscan_victims(sim, attacker, list, &player, &player_slot);
     idx = q2_combat_trace_actors(start, result.end, NULL, list, n, at);
-    if (idx >= 0 && idx == player_slot) {
+    if (idx >= 0 && list[idx] == &player) {
         q2_sim_hurt_player(sim, attacker, damage, Q2_MOD_RAIL, at);
         result.player_hit = true;
     } else if (idx >= 0) {
@@ -1989,7 +2106,7 @@ q2_cre_rail_result q2_sim_creature_laser(q2_sim *sim, q2_actor *attacker,
     q2_sim_breakable_shot(sim, from, result.end, damage);
     area = q2_sim_fx_area(sim, 0, from);
     if (hit >= 0) {
-        if (hit == player_slot) {
+        if (list[hit] == &player) {
             q2_sim_hurt_player(sim, attacker, damage, Q2_MOD_LASER, contact);
             result.player_hit = true;
         } else {

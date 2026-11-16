@@ -29,6 +29,15 @@ typedef struct q2_cre_motion_world {
     const q2_move_bodies *bodies;
     s32 self_id, gravity;
     bool multiplayer, suspended;
+    /*
+     * Set when the tick reached one of the creature's own appends to the
+     * frame's actor list (0x800552B4): the interpolation move's NewTrueMove3d
+     * (0x8007EFD0 with a2 = 1, 0x80045990 behind the +0x10C bit 0x80000 test)
+     * or the corpse handler's (0x8007F740). Not the tick loop's moves (a2 = 0,
+     * 0x8007EE00), a suspended creature (0x8007EC60) or a body on its detach
+     * frame (0x8007F098). The owner makes the append (q2_sim_bump_append).
+     */
+    bool *appended;
 } q2_cre_motion_world;
 
 struct q2_monster;

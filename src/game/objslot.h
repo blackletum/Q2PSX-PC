@@ -43,4 +43,13 @@ q2_obj_owner q2_obj_slot_owner(s32 slot, s32 *ref);
 /* How many are taken (the cursor's depth). */
 u32  q2_obj_slots_used(void);
 
+/*
+ * How many times the slot has been handed out. A pointer kept past a free
+ * (the actor list's, sim.h) still names the record; this says whether the
+ * record is still the object it was taken from or has been allocated again
+ * (0x8006C18C clears all 768 bytes on the way out). Never reset, so a serial
+ * taken before a level change cannot match one taken after it.
+ */
+u32  q2_obj_slot_serial(s32 slot);
+
 #endif

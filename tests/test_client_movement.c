@@ -101,8 +101,11 @@ static void test_motion_stages(void)
     CHECK(p->vel[0] == 720 && p->vel[1] == -96);
     CHECK(!(p->ent2_flags & Q2_ENT2_FLY));
     CHECK(!(p->ent.flags & (Q2_ENT_INLOWCROUCH | Q2_ENT_UNDERWATER)));
-    CHECK(sim->bodies[0].solid && !sim->bodies[1].solid &&
-          !sim->bodies[2].solid && !sim->bodies[3].solid);
+    /* The actor list a frame reads is the one the previous frame appended
+     * (0x8005525C), so the first is empty. Player 0's corpse handler appended
+     * (0x80039588); with the DEAD bit up its move did not (0x8004597C). */
+    CHECK(sim->body_count == 0 && sim->bump_next_count == 1 &&
+          sim->bump_next[0].id == -2);
 
     /* respawn_think calls the shared mover without corpse braking. */
     q2_sim_select_player(sim, 1);
@@ -136,6 +139,11 @@ static void test_motion_stages(void)
         q2_sim_tick(sim, &input, 12);
         CHECK(!memcmp(pos, p->pos, sizeof(pos)) && !memcmp(vel, p->vel, sizeof(vel)));
         CHECK(sim->level_time == 24); /* the world still advances */
+        /* Last frame's appends, in order: player 0's handler, then player
+         * 1's (0x8003E25C). Neither is solid now: 0 is gibbed, 1 is down. */
+        CHECK(sim->body_count == 2 && sim->bodies[0].id == -2 &&
+              sim->bodies[1].id == -3 && !sim->bodies[0].solid &&
+              !sim->bodies[1].solid);
     }
     c->death[0].stage = Q2_PDEATH_GIBBED;
     c->death[1].stage = Q2_PDEATH_GONE;
@@ -144,7 +152,13 @@ static void test_motion_stages(void)
           sim->player[1].motion == Q2_PLAYER_MOTION_NONE);
 
     q2_sim_spawn(sim, spawn, 0);
-    CHECK(p->motion == Q2_PLAYER_MOTION_LIVE && !p->corpse_separate);
+    CHECK(p->motion == Q2_PLAYER_MOTION_LIVE && !p->corpse_separate &&
+          !p->corpse_appends);
+    /* A live player appends through its move and is solid a frame later. */
+    q2_sim_tick(sim, &input, 12);
+    q2_sim_tick(sim, &input, 12);
+    CHECK(sim->body_count == 1 && sim->bodies[0].id == -2 &&
+          sim->bodies[0].solid);
     q2_sim_free(sim);
     free(c);
 }
@@ -220,6 +234,10 @@ static void test_corpse_separation(q2_sim *sim)
         memset(p->frame_delta, 0, sizeof(p->frame_delta));
         p->motion = Q2_PLAYER_MOTION_CORPSE;
         p->corpse_separate = pass == 0;
+        /* Player 1 never ticks here, so it is put on the list its own move
+         * would have built the frame before (0x80045990); the tick's swap
+         * hands it to the separation pass. */
+        q2_sim_bump_append(sim, -3, -1);
         q2_sim_tick(sim, &input, 12);
         /* The same overlapping bodies, before and after the death chain
          * raises DEAD. Only the first pass pushes this corpse away. */

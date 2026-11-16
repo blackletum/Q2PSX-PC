@@ -837,7 +837,8 @@ bool q2_monster_corpse_tick_dt(q2_monster *m, s32 dt)
     /*
      * The handler's other three calls advance no animation: 0x8007F738 is the
      * presentation chain (simcombat.c's pass here) and 0x8007F740 appends the
-     * body to the actor list, which this port's fixed target list stands for.
+     * body to the actor list, which q2_cre_motion_tick reports to its owner
+     * (q2_cre_motion_world.appended).
      * The frame driver below is the port's own, kept from before, so that a
      * corpse whose move has not run out still plays it. Where the console
      * advances a detached body's frame, if anywhere, is not traced here.

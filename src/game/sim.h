@@ -173,6 +173,15 @@ typedef struct q2_player {
     /* The client's death chain raises DEAD later than the sim's input gate.
      * Until then a corpse still takes the mover's body-separation pass. */
     bool corpse_separate;
+    /*
+     * The corpse handler's own append this tick, ahead of its move:
+     * PrimaryQuakeDyingPlayer's 0x80039588 (not on its smash arm) and
+     * PrimaryQuakeDeadPlayerBody's 0x8003E25C (not when its dissolve gate
+     * 0x8005B2A8 answers, smash arm included). The move's own append is
+     * NewTrueMove3d's, gated as the separation is (0x8004597C). Selected by
+     * the client with `motion`; a library caller leaves it false.
+     */
+    bool corpse_appends;
     s32  pos[3];        /* world units                                        */
     s32  vel[3];        /* world units per dt, pre-divide by Q2_VEL_DIV       */
 
@@ -508,6 +517,22 @@ typedef struct q2_breakable {
     s32 solid_target;
     bool broken;
 } q2_breakable;
+
+/*
+ * One entry of the frame's actor list (0x800B2B90): an object pointer on the
+ * console, a handle here. `id` is the body handle (a creature's set index, or
+ * -(slot + 2) for a player); `slot` and `serial` are the object slot it held
+ * when it was appended (objslot.h), or -1 for a body the slot mirror does not
+ * hold. They are what lets a pointer outlive its object: a corpse that is
+ * smashed after appending itself (0x8007F740, 0x8007F764) stays on the next
+ * frame's list until its record is handed out again.
+ */
+#define Q2_BUMP_LIST_MAX 32
+typedef struct q2_bump_ref {
+    s32 id;
+    s32 slot;
+    u32 serial;
+} q2_bump_ref;
 
 typedef struct q2_sim {
     const q2_world_zone *zone;
@@ -883,19 +908,44 @@ typedef struct q2_sim {
      * nothing corresponding to it — `move_world` above is doors, glass and
      * trigger brushes, and no creature was ever in it.
      *
-     * Rebuilt each tick from the sim's own players and from whatever the owner
-     * has registered with `q2_sim_set_bodies` (the creatures; the client keeps
-     * them). Owned here rather than borrowed because the players have to go in
-     * it and only the sim has them.
+     * InitialiseBumpListFrame (0x8005525C, from ChrisInitEveryFrame at
+     * 0x800704D8) swaps the halves: what was appended LAST frame becomes the
+     * list every query reads (base 0x800B2B90, end 0x800B2B98), and the other
+     * half is emptied for this frame's appends (cursor 0x800B2BA0, cap
+     * 0x800B2B9C = base + 128, so 32 pointers, and AddCreToNextBumpList
+     * 0x800552B4 drops anything past them). Every reader — CheckVersusBumpList,
+     * gitrace, the bullet, the rail, both lasers, FindPlayerTarget — walks that
+     * previous frame's list in its order, which is the order the handlers ran:
+     * MoveModels' slot order, the player in slot 0.
+     *
+     * `bump_next` is this frame's half, appended by q2_sim_bump_append: the
+     * sim appends its players, the owner its creatures. `bodies` is the read
+     * half made into body records at the swap, one per entry, duplicates and
+     * all, and kept current as each owner moves (the console's entries are
+     * POINTERS; q2_sim_body_refresh). Not saved: a load starts with both
+     * halves empty, as InitEveryLevel (0x80055288) does.
      */
     q2_move_body   *bodies;
     u32             body_count;
     u32             body_capacity;
     q2_move_bodies  body_world;
+    q2_bump_ref     bump_next[Q2_BUMP_LIST_MAX];
+    u32             bump_next_count;
+    q2_bump_ref     bump_read[Q2_BUMP_LIST_MAX];  /* parallel to `bodies` */
 
     /* What the owner registered, kept so the rebuild can copy it. Borrowed. */
     const q2_move_body *extra_bodies;
     u32                 extra_body_count;
+    /*
+     * The actor behind each registered body, by the same handle
+     * (q2_sim_set_body_actors). With it the shots take their candidates from
+     * the frame's list; without it (a caller with no creature list of its own)
+     * they keep `combat.targets`. `bump_ghost` holds the copies a stale entry
+     * is shot as (q2_sim_bump_actors).
+     */
+    q2_actor *const    *body_actors;
+    u32                 body_actor_count;
+    q2_actor            bump_ghost[Q2_BUMP_LIST_MAX];
 
     /*
      * Take up a better weapon the moment it is picked up.
@@ -2074,11 +2124,48 @@ void q2_sim_set_targets(q2_sim *sim, q2_actor **targets, u32 count);
  * stepped mover separates (0x80051258, radius entity+0x90 = 128). A corpse is
  * on one and not the other.
  *
- * The sim copies the entries into its own array on the next tick; the caller
- * keeps ownership of what it passes and may pass NULL to clear it. The sim adds
- * its own players, so a caller registers creatures only.
+ * What is registered is what an entry on the frame's actor list is read
+ * through: the sim copies the entries the list names into its own array at
+ * the swap (q2_sim_bump_append). The caller keeps ownership of what it passes
+ * and may pass NULL to clear it. The sim appends its own players, so a caller
+ * registers creatures only.
  */
 void q2_sim_set_bodies(q2_sim *sim, const q2_move_body *bodies, u32 count);
+
+/*
+ * AddCreToNextBumpList (0x800552B4): put body `id` on THIS frame's list, which
+ * the queries read from the next frame on. `slot` is the object slot the body
+ * holds (-1 for none). Past 32 entries the append is dropped, as the
+ * console's `beq cursor, cap` drops it. The sim appends its own players; the
+ * owner appends a creature where its handler does: the interpolation move's
+ * NewTrueMove3d (0x8007EFD0, a2 = 1, +0x10C bit 0x80000 clear) and the
+ * corpse handler (0x8007F740).
+ */
+void q2_sim_bump_append(q2_sim *sim, s32 id, s32 slot);
+
+/*
+ * A registered body has moved: bring every list entry for its handle up to
+ * date, as reading through the console's pointer would. Membership is the
+ * list's and does not change.
+ */
+void q2_sim_body_refresh(q2_sim *sim, const q2_move_body *body);
+
+/*
+ * The actor behind each registered body, indexed by its handle. Once set,
+ * every hitscan and the autoaim take their candidates from the frame's list
+ * (q2_sim_bump_actors) rather than from `q2_sim_set_targets`.
+ */
+void q2_sim_set_body_actors(q2_sim *sim, q2_actor *const *actors, u32 count);
+
+/*
+ * The frame's list as shot candidates, in its order: a player's entry is
+ * `player` for the current player (the caller's copy at its entity origin,
+ * NULL to use `combat.self`) or that player's parked actor, a creature's is its
+ * registered actor, and a stale entry whose record has not been handed out
+ * again is a copy of the actor as it was freed. Returns the count, or -1 when
+ * no actors are registered.
+ */
+s32 q2_sim_bump_actors(q2_sim *sim, q2_actor *player, q2_actor **out, u32 cap);
 
 /* Reset the combat state to a freshly spawned player: the blaster, no other
  * weapon, an empty projectile list. Called by q2_sim_init. */

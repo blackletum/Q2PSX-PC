@@ -1230,74 +1230,114 @@ static s32 sim_body_id_for_player(int slot)
 }
 
 /*
- * Rebuild the list: this sim's live players, then whatever the owner
- * registered. Once per tick, before the players move — the console appends
- * inside the mover itself (0x80045990) and swaps the whole array each frame
- * (0x8005525C), so nothing survives a tick it was not rebuilt in.
+ * One player's body record, read through its handle as the console reads the
+ * player object through its list pointer.
+ */
+static void sim_player_body(const q2_sim *sim, int i, q2_move_body *b)
+{
+    const q2_player *p = &sim->player[i];
+    int k;
+
+    memset(b, 0, sizeof(*b));
+    for (k = 0; k < 3; k++) {
+        b->pos[k]  = p->ent.pos[k];
+        b->mins[k] = q2_player_body_mins[k];
+        b->maxs[k] = q2_player_body_maxs[k];
+    }
+    b->radius       = Q2_ACTOR_BODY_RADIUS;   /* +0x90 (trace.h) */
+    /* entity+0x94 and +0x96 for a live player, the pair combat.c already
+     * writes into the player's actor: 286 and 572, origin -286..+286. */
+    b->sweep_radius = Q2_SWEEP_HALF_EXTENT;
+    b->height       = (s16)(Q2_SWEEP_HALF_EXTENT * 2);
+    b->id           = sim_body_id_for_player(i);
+    /* A corpse remains a body until the down transition sets 0x8000
+     * (0x8003966C), the separation gate at 0x800513F0. Health alone
+     * cannot decide solidity: an animating corpse still blocks others. */
+    b->solid        = p->motion == Q2_PLAYER_MOTION_LIVE ||
+                      p->motion == Q2_PLAYER_MOTION_CORPSE;
+    b->listed       = true;
+}
+
+/* The registered body behind a creature handle, or NULL. */
+static const q2_move_body *sim_extra_body(const q2_sim *sim, s32 id)
+{
+    u32 i;
+
+    if (!sim->extra_bodies || id < 0)
+        return NULL;
+    if ((u32)id < sim->extra_body_count && sim->extra_bodies[id].id == id)
+        return &sim->extra_bodies[id];
+    for (i = 0; i < sim->extra_body_count; i++)
+        if (sim->extra_bodies[i].id == id)
+            return &sim->extra_bodies[i];
+    return NULL;
+}
+
+/*
+ * Whether an entry still names a record at all. An entry whose slot has been
+ * handed out since it was appended points at whatever took the slot: the
+ * allocator clears the record (0x8006C18C) and nothing the port allocates
+ * there gives it a cylinder, so it is dropped. One whose slot is merely free
+ * is the freed record itself, which keeps its origin and its pair.
+ */
+static bool sim_bump_ref_valid(const q2_bump_ref *r)
+{
+    return r->slot < 0 || q2_obj_slot_serial(r->slot) == r->serial;
+}
+
+/*
+ * InitialiseBumpListFrame, 0x8005525C: the halves swap, so the queries of this
+ * frame read what was appended in the last one, in the order it was appended,
+ * and this frame's half starts empty. Once a frame, at the top, before any
+ * handler runs (ChrisInitEveryFrame calls it at 0x800704D8, ahead of MoveModels).
  */
 static void sim_bodies_rebuild(q2_sim *sim)
 {
-    u32 want, n = 0;
-    int i;
+    q2_bump_ref read[Q2_BUMP_LIST_MAX];
+    u32 count, n = 0, i;
+
+    count = sim->bump_next_count;
+    memcpy(read, sim->bump_next, count * sizeof(read[0]));
+    sim->bump_next_count = 0;
 
     sim->body_count        = 0;
     sim->body_world.list   = NULL;
     sim->body_world.count  = 0;
 
-    want = (u32)Q2_SIM_MAX_PLAYERS + sim->extra_body_count;
-    if (want > sim->body_capacity) {
-        q2_move_body *grown =
-            (q2_move_body *)realloc(sim->bodies, want * sizeof(*grown));
+    if (sim->body_capacity < Q2_BUMP_LIST_MAX) {
+        q2_move_body *grown = (q2_move_body *)realloc(
+            sim->bodies, Q2_BUMP_LIST_MAX * sizeof(*grown));
 
         if (!grown)
             return;
         sim->bodies        = grown;
-        sim->body_capacity = want;
+        sim->body_capacity = Q2_BUMP_LIST_MAX;
     }
-    if (!sim->bodies)
-        return;
 
-    for (i = 0; i < Q2_SIM_MAX_PLAYERS; i++) {
-        const q2_player *p = &sim->player[i];
-        q2_move_body *b;
-        int k;
+    for (i = 0; i < count; i++) {
+        const q2_bump_ref *r = &read[i];
+        q2_move_body *b = &sim->bodies[n];
 
-        /*
-         * Slot 0 is always live; the rest only once multiplayer has spawned
-         * them. `player_count` is what says so, and a slot past it holds the
-         * zeros q2_sim_init left, which would put a body at the origin.
-         */
-        if (i > 0 && i >= sim->player_count)
+        if (!sim_bump_ref_valid(r))
             continue;
+        if (r->id <= -2) {
+            int slot = (int)(-r->id - 2);
 
-        /* A corpse remains a body until the down transition sets 0x8000
-         * (0x8003966C), the separation gate at 0x800513F0. Health alone
-         * cannot decide solidity: an animating corpse still blocks others. */
-        b = &sim->bodies[n++];
-        memset(b, 0, sizeof(*b));
-        for (k = 0; k < 3; k++) {
-            b->pos[k]  = p->ent.pos[k];
-            b->mins[k] = q2_player_body_mins[k];
-            b->maxs[k] = q2_player_body_maxs[k];
+            /* A slot past `player_count` holds the zeros q2_sim_init left. */
+            if (slot >= Q2_SIM_MAX_PLAYERS ||
+                (slot > 0 && slot >= sim->player_count))
+                continue;
+            sim_player_body(sim, slot, b);
+        } else {
+            const q2_move_body *e = sim_extra_body(sim, r->id);
+
+            if (!e)
+                continue;
+            *b = *e;
+            /* On the list is what `listed` says; the entry is the answer. */
+            b->listed = true;
         }
-        b->radius       = Q2_ACTOR_BODY_RADIUS;   /* +0x90 (trace.h) */
-        /* entity+0x94 and +0x96 for a live player, the pair combat.c already
-         * writes into the player's actor: 286 and 572, origin -286..+286. */
-        b->sweep_radius = Q2_SWEEP_HALF_EXTENT;
-        b->height       = (s16)(Q2_SWEEP_HALF_EXTENT * 2);
-        b->id           = sim_body_id_for_player(i);
-        b->solid        = p->motion == Q2_PLAYER_MOTION_LIVE ||
-                          p->motion == Q2_PLAYER_MOTION_CORPSE;
-        /* Every player record appends itself, alive or not: PrimaryQuake-
-         * Player through QCre_Move's NewTrueMove3d, then PrimaryQuakeDying-
-         * Player (0x80039588) and PrimaryQuakeDeadPlayerBody (0x8003E25C). */
-        b->listed       = true;
-    }
-
-    if (sim->extra_bodies && sim->extra_body_count) {
-        memcpy(sim->bodies + n, sim->extra_bodies,
-               sim->extra_body_count * sizeof(*sim->bodies));
-        n += sim->extra_body_count;
+        sim->bump_read[n++] = *r;
     }
 
     sim->body_count       = n;
@@ -1305,10 +1345,45 @@ static void sim_bodies_rebuild(q2_sim *sim)
     sim->body_world.count = n;
 }
 
+void q2_sim_bump_append(q2_sim *sim, s32 id, s32 slot)
+{
+    q2_bump_ref *r;
+
+    if (!sim || id == -1)
+        return;
+    /* 0x800552C0 `beq v1, v0`: a full half takes nothing more. */
+    if (sim->bump_next_count >= Q2_BUMP_LIST_MAX)
+        return;
+    r = &sim->bump_next[sim->bump_next_count++];
+    r->id     = id;
+    r->slot   = slot;
+    r->serial = slot >= 0 ? q2_obj_slot_serial(slot) : 0;
+}
+
+void q2_sim_body_refresh(q2_sim *sim, const q2_move_body *body)
+{
+    u32 i;
+
+    if (!sim || !body || !sim->bodies)
+        return;
+    for (i = 0; i < sim->body_count; i++) {
+        if (sim->bodies[i].id != body->id)
+            continue;
+        /* A record handed out again since the append is not this body. */
+        if (!sim_bump_ref_valid(&sim->bump_read[i])) {
+            sim->bodies[i].listed = false;
+            sim->bodies[i].solid  = false;
+            continue;
+        }
+        sim->bodies[i]        = *body;
+        sim->bodies[i].listed = true;
+    }
+}
+
 /*
  * The console's list holds POINTERS to the objects (0x80045990 appends the
  * object itself), so a body is wherever its object is when somebody looks.
- * This list holds copies, so a player's entry is brought up to date once the
+ * This list holds copies, so a player's entries are brought up to date once the
  * player has moved; the creatures' traces after that see where the player
  * stands now. Left at the pre-move copy, a Soldier's M_CheckAttack trace on
  * BASE3's attract run (record frame 380) passed the spot player one had left
@@ -1316,17 +1391,10 @@ static void sim_bodies_rebuild(q2_sim *sim)
  */
 static void sim_bodies_refresh_player(q2_sim *sim, int slot)
 {
-    s32 id = sim_body_id_for_player(slot);
-    u32 i;
-    int k;
+    q2_move_body b;
 
-    for (i = 0; i < sim->body_count; i++) {
-        if (sim->bodies[i].id != id)
-            continue;
-        for (k = 0; k < 3; k++)
-            sim->bodies[i].pos[k] = sim->player[slot].ent.pos[k];
-        return;
-    }
+    sim_player_body(sim, slot, &b);
+    q2_sim_body_refresh(sim, &b);
 }
 
 static void mover_targets_drop(q2_sim *sim)
@@ -1860,6 +1928,7 @@ void q2_sim_spawn(q2_sim *sim, const s32 pos[3], s32 yaw)
     sim->player[sim->cur_player].autocentre    = 0;
     sim->player[sim->cur_player].motion        = Q2_PLAYER_MOTION_LIVE;
     sim->player[sim->cur_player].corpse_separate = false;
+    sim->player[sim->cur_player].corpse_appends  = false;
     sim->player[sim->cur_player].ent2_flags    = 0;
     sim->player[sim->cur_player].prev_health   = sim->combat.inv.health;
     sim->player[sim->cur_player].prev_armour   = sim->combat.inv.armour;
@@ -3826,11 +3895,11 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
         q2_ent_events_clear(&sim->ent_world.events);
 
     /*
-     * The actor list, rebuilt before anything moves. The console swaps its two
+     * The actor list, swapped before anything moves. The console swaps its two
      * halves at the top of a frame (0x8005525C) and every mover appends itself
-     * on the way in (0x80045990), so the list a body separates against is this
-     * frame's. Once a frame, not once a player, for the same reason the counter
-     * above is.
+     * on the way in (0x80045990), so the list a body separates against is the
+     * one LAST frame's movers built. Once a frame, not once a player, for the
+     * same reason the counter above is.
      */
     if (run_world)
         sim_bodies_rebuild(sim);
@@ -3864,8 +3933,23 @@ void q2_sim_tick(q2_sim *sim, const q2_input *input, s32 dt)
         }
     }
 
-    if (p->motion != Q2_PLAYER_MOTION_NONE)
-        player_move(sim, dt, !dead || p->corpse_separate);
+    /*
+     * The player's appends, at slot 0's turn and so ahead of every creature's.
+     * A corpse handler appends first (q2_player.corpse_appends), then QCre_Move
+     * (0x80039AA4, a1 = a2 = 1) appends through NewTrueMove3d at 0x80045990
+     * whenever +0x10C bit 0x80000 is clear, the same test that runs the
+     * separation, so a dying player whose DEAD bit is not up yet is on the
+     * list twice.
+     */
+    if (p->corpse_appends)
+        q2_sim_bump_append(sim, sim_body_id_for_player(sim->cur_player), -1);
+    if (p->motion != Q2_PLAYER_MOTION_NONE) {
+        bool separate = !dead || p->corpse_separate;
+
+        if (separate)
+            q2_sim_bump_append(sim, sim_body_id_for_player(sim->cur_player), -1);
+        player_move(sim, dt, separate);
+    }
     sim_bodies_refresh_player(sim, sim->cur_player);
 
     /*

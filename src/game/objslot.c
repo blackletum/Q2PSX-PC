@@ -4,6 +4,7 @@ static s8  g_stack[Q2_OBJ_SLOTS];   /* 0x800D4A28: free slot numbers        */
 static u32 g_used;                  /* the cursor's depth, 0x800B2BAC       */
 static u8  g_owner[Q2_OBJ_SLOTS];
 static s32 g_ref[Q2_OBJ_SLOTS];
+static u32 g_serial[Q2_OBJ_SLOTS]; /* bumped by every allocation, never reset */
 
 void q2_obj_slots_reset(void)
 {
@@ -29,6 +30,7 @@ s32 q2_obj_slot_alloc(q2_obj_owner owner, s32 ref)
     slot = g_stack[g_used++];             /* 0x8006C17C `lw s0, 0(v1)` */
     g_owner[slot] = (u8)owner;
     g_ref[slot]   = ref;
+    g_serial[slot]++;
     return slot;
 }
 
@@ -57,4 +59,9 @@ q2_obj_owner q2_obj_slot_owner(s32 slot, s32 *ref)
 u32 q2_obj_slots_used(void)
 {
     return g_used;
+}
+
+u32 q2_obj_slot_serial(s32 slot)
+{
+    return slot >= 0 && slot < Q2_OBJ_SLOTS ? g_serial[slot] : 0;
 }

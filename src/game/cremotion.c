@@ -132,6 +132,9 @@ static void move_actor(q2_monster *m, s32 dt, bool integrate,
     }
     if (integrate && !(p->flags & 0x80000u)) {
         q2_rng rng = { q2_random_state(), NULL };
+        /* 0x80045990: on the list before the separation reads it. */
+        if (w && w->appended)
+            *w->appended = true;
         u32 result = q2_move_separate(w ? w->bodies : NULL, w ? w->self_id : -1,
             p->ent.pos, m->mins, m->maxs, Q2_ACTOR_BODY_RADIUS, p->delta, &rng);
         q2_random_seed(rng.state);
@@ -183,7 +186,21 @@ u32 q2_cre_motion_tick(q2_monster *m, s32 dt, const q2_cre_motion_world *w)
         q2_monster_corpse_detach(m);
         return 0;
     }
-    if (m->corpse) { q2_monster_corpse_tick_dt(m, dt); return 0; }
+    if (m->corpse) {
+        /*
+         * PrimaryQuakeDeadBody appends at 0x8007F740 unless the dissolve
+         * handler already owns +0x3C or its gate 0x8005B2A8 answers now; a
+         * body smashed on this tick has appended first (0x8007F764).
+         */
+        bool append = m->dissolve_arm == Q2_CORPSE_DISSOLVE_NONE &&
+                      q2_corpse_dissolve_pick(m->effect) ==
+                          Q2_CORPSE_DISSOLVE_NONE;
+
+        q2_monster_corpse_tick_dt(m, dt);
+        if (append && w && w->appended)
+            *w->appended = true;
+        return 0;
+    }
     /* 0x8007EC40..0x8007EC64: the global counter, not the level fields. */
     if (w && w->suspended) { p->clock = q2_level_tick; return 0; }
     phase = (s32)p->phase - p->phase_base;

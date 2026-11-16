@@ -614,6 +614,27 @@ multiplayer ones (15, one or two turns), and the two revisions agree.
 python -B tests/fixtures/generate_rail_reference.py .install/disc/game.cue '<US-disc.cue>' --trace .agents/tmp/functional-parity/rail/native.json --check
 ```
 
+## Native actor list
+
+`generate_bump_list_reference.py` verifies the PAL/US executable hashes and runs
+the actor list's own code: InitEveryLevel's setup (`0x80055288`), then 24
+scripted frames of InitialiseBumpListFrame (`0x8005525C`) followed by
+AddCreToNextBumpList (`0x800552B4`) calls, reading `0x800B2B90..0x800B2B98`
+after each swap. Object 0 stands for the player and appends first, as slot 0
+does; some frames append it twice, as a dying player does, and some append
+past the 32-pointer cap. It then runs LineIntersectCreCylinder (`0x800544EC`)
+on 856 two-body crossings with the bodies listed both ways round, half of
+them starting inside both cylinders. Nothing is hooked. The two revisions
+agree.
+
+`test_bumplist` drives the sim through the same frames (its tick swaps and
+appends the player, the test appends the rest) and fires a creature round
+through `q2_sim_creature_hitscan` with the two bodies appended in each order.
+
+```powershell
+python -B tests/fixtures/generate_bump_list_reference.py .install/disc/game.cue '<US-disc.cue>' --trace .agents/tmp/bump/native.json
+```
+
 ## Native level VRAM
 
 `generate_vram_reference.py` runs each level-table map's retail load (the heap

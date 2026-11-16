@@ -2983,9 +2983,10 @@ static void client_load_creatures(client *c, const s32 eye[3])
     /*
      * AND THE OTHER BODIES, which are in neither hull either.
      *
-     * The sim rebuilds its actor list every world tick (sim.h) from its own
-     * players plus whatever `q2_sim_set_bodies` registered — which is
-     * `client_bodies_publish` below, once per frame, from the creature set. The
+     * The sim swaps its actor list every world tick (sim.h): the bodies are
+     * what was appended the frame before — its own players, and the creatures
+     * client_creatures_tick appends — read through what `q2_sim_set_bodies`
+     * registered, which the frame publishes from the creature set. The
      * address handed over is the sim's `body_world` itself, whose own array
      * moves as creatures come and go.
      *
@@ -4848,7 +4849,7 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
 {
     s32 ticks = (s32)((double)dt * 300.0 + 0.5);
     s32 old_clock;
-    u32 i, j;
+    u32 i;
     u32 active_areas[3];
     bool activity_ready;
 
@@ -4934,7 +4935,9 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
         if (slot >= 0)
             q2_sim_entities_to(&c->sim[0], slot);
         q2_cre_motion_world world = {0};
+        bool appended = false;
         world.coll = c->sim[0].coll_ready ? &c->sim[0].coll : NULL;
+        world.appended = &appended;
         world.world = &c->sim[0].move_world;
         world.bodies = &c->sim[0].body_world;
         world.self_id = (s32)i;
@@ -4953,6 +4956,14 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
                 (area >= 0 && psx_ot_area_bucket(&c->ot, (u32)area, NULL)), c->cam.pos);
         }
         c->ai_thoughts += q2_cre_motion_tick(m, ticks, &world);
+        /*
+         * AddCreToNextBumpList, at this record's turn in MoveModels' walk, so
+         * next frame's list runs in slot order behind the player's slot 0. A
+         * body smashed on this tick has appended first and is freed below; its
+         * entry stays on next frame's list until the slot is taken again.
+         */
+        if (appended)
+            q2_sim_bump_append(&c->sim[0], (s32)i, slot);
         if (m->in_use && !m->corpse && !world.suspended &&
             c->cre_model_ok && c->cre_model_ok[i]) {
             const q2_cre_frame_name *rec = q2_creature_world_frame_name(
@@ -4972,8 +4983,8 @@ static void client_creatures_tick(client *c, float dt, const s32 eye[3])
             body->listed = m->in_use && !m->dissolve_arm;
             body->sweep_radius = m->hit_radius;
             body->height = m->hit_height;
-            for (j = 0; j < c->sim[0].body_count; j++)
-                if (c->sim[0].bodies[j].id == (s32)i) c->sim[0].bodies[j] = *body;
+            /* Read through the list's pointer: every entry it has. */
+            q2_sim_body_refresh(&c->sim[0], body);
         }
         if (slot >= 0) {
             /* The walk is past this record now, whatever takes it next. */
@@ -12994,6 +13005,16 @@ static void client_player_motion(client *c)
          * The sim sets its own bit earlier to stop input and firing. */
         p->corpse_separate = d->stage == Q2_PDEATH_DYING &&
                              !(d->ent2 & Q2_PDEATH_DEAD_BIT);
+        /*
+         * The corpse handler's own append (q2_player.corpse_appends): the
+         * dying think's 0x80039588 unless it smashes (0x80039578), and the
+         * dead body's 0x8003E25C unless its dissolve gate answers
+         * (0x8003E24C), which on a smash it has not.
+         */
+        p->corpse_appends =
+            (d->stage == Q2_PDEATH_DYING && health > d->gib_health) ||
+            (d->stage == Q2_PDEATH_DOWN &&
+             q2_corpse_dissolve_pick(actor->effect) == Q2_CORPSE_DISSOLVE_NONE);
         if (d->stage == Q2_PDEATH_ALIVE) {
             p->motion = Q2_PLAYER_MOTION_LIVE;
         } else if (d->stage == Q2_PDEATH_DYING && health > d->gib_health) {
@@ -13473,6 +13494,18 @@ static void client_input_simulated(client *c, float dt)
             }
         }
         q2_sim_set_bodies(&c->sim[0], c->cre_body, c->creatures.set.count);
+        /*
+         * And the actor behind each body, so the shots read the frame's actor
+         * list as the console's do (sim.h): the same handles, in the order the
+         * handlers appended them. With no creatures the list still holds the
+         * players, so an empty table is registered rather than none.
+         */
+        q2_sim_set_body_actors(&c->sim[0], c->cre_target,
+                               c->creatures.set.count);
+    } else {
+        static q2_actor *const no_actors[1] = { NULL };
+
+        q2_sim_set_body_actors(&c->sim[0], no_actors, 0);
     }
 
     if (in.attack) c->player_attacks++;
