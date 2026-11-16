@@ -23,6 +23,7 @@
 #include "levelbin.h"
 #include "trig.h"        /* the spark's reference velocities                */
 #include "vram.h"        /* q2_vram_clut_word: the debris binding's CLUT    */
+#include "fixtures/rail_reference.h"
 
 static int g_failures;
 static int g_checks;
@@ -576,7 +577,11 @@ static void test_rail_trail(void)
     q2_fx_world w;
     static const s32 start[3] = { 100, 200, 300 };
     static const s32 end[3]   = { 100, 200, 3300 };
-    static const s16 basis[2][3] = { { 4096, 0, 0 }, { 0, 4096, 0 } };
+    /* RotMatrix rows whose Y row is negated, so RotateS and the negation
+     * after it leave the ring's (cos, sin) where it was. */
+    static const s16 basis[3][3] = {
+        { 4096, 0, 0 }, { 0, -4096, 0 }, { 0, 0, 4096 }
+    };
     s32 cs, sn, pstep;
     u32 n;
 
@@ -626,6 +631,76 @@ static void test_rail_trail(void)
                              NULL, NULL);
     }
     check_eq_i(n, 1, "a beam under 1024 units is the last group alone");
+}
+
+/*
+ * The ring against AnyoneFireInstantRail's own loop, 0x80049678..0x80049758,
+ * executed natively with the shooter's matrix built by the retail RotMatrix
+ * (generate_rail_reference.py): the rcossin lookup, RotateS in place and the
+ * Y negated after its `>> 12`. Single-player and both multiplayer spacings;
+ * level, pitched, rolled and arbitrary shooters.
+ */
+static void test_native_rail_ring(void)
+{
+    size_t i;
+    u32 ring_bad = 0, matrix_bad = 0, folded_bad = 0, rings = 0;
+    u32 folded_ring = 0, folded_stored = 0, folded_drift = 0;
+
+    printf("rail: the ring against the native loop\n");
+
+    for (i = 0; i < Q2PSX_ARRAY_COUNT(native_rail); i++) {
+        const native_rail_case *c = &native_rail[i];
+        s16 rot[3][3];
+        int n, k;
+
+        q2_rotation_euler(rot, c->angles[0], c->angles[1], c->angles[2]);
+        for (k = 0; k < 9; k++)
+            if (rot[k / 3][k % 3] != c->matrix[k]) {
+                matrix_bad++;
+                break;
+            }
+        for (n = 0; n < c->per; n++) {
+            s32 angle = n * c->astep;
+            s32 cs = q2_cos12(angle & 0xFFF), sn = q2_sin12(angle & 0xFFF);
+            s16 v[3], folded;
+
+            rings++;
+            q2_fx_rail_ring((const s16 (*)[3])rot, angle, v);
+            if (v[0] != c->ring[n][0] || v[1] != c->ring[n][1] ||
+                v[2] != c->ring[n][2]) {
+                if (ring_bad++ < 8)
+                    printf("  ring %u.%d: angles (%d,%d,%d): port (%d,%d,%d), "
+                           "native (%d,%d,%d)\n", (unsigned)i, n,
+                           c->angles[0], c->angles[1], c->angles[2],
+                           v[0], v[1], v[2], c->ring[n][0], c->ring[n][1],
+                           c->ring[n][2]);
+            }
+            /* The order this replaced: the negation folded into the matrix,
+             * then floored. Counted, to show the fixture can tell. */
+            folded = (s16)((-(s32)rot[1][0] * cs - (s32)rot[1][1] * sn) >> 12);
+            if (folded != c->ring[n][1])
+                folded_bad++;
+            if ((folded >> Q2_FX_RAIL_RING_SHIFT) !=
+                (c->ring[n][1] >> Q2_FX_RAIL_RING_SHIFT))
+                folded_ring++;
+            if ((folded >> (Q2_FX_RAIL_RING_SHIFT + 4)) !=
+                (c->ring[n][1] >> (Q2_FX_RAIL_RING_SHIFT + 4)))
+                folded_stored++;
+            if ((folded >> Q2_FX_RAIL_DRIFT_SHIFT) !=
+                (c->ring[n][1] >> Q2_FX_RAIL_DRIFT_SHIFT))
+                folded_drift++;
+        }
+    }
+    check_eq_i(matrix_bad, 0, "q2_rotation_euler is RotMatrix for the ring too");
+    check_eq_i(ring_bad, 0, "every ring vector is the native loop's");
+    check(folded_bad > rings / 2,
+          "and the negation folded into the matrix misses most of them");
+    /* How far the unit survives: the ring's `>> 2`, the spawner's further
+     * `>> 4` (a beam-wise offset of zero), and the drift's `>> 10`. */
+    printf("  folded order: %u of %u ring Y off, %u after >> 2, %u stored, "
+           "%u drifts\n", (unsigned)folded_bad, (unsigned)rings,
+           (unsigned)folded_ring, (unsigned)folded_stored,
+           (unsigned)folded_drift);
 }
 
 /*
@@ -3932,6 +4007,7 @@ int main(void)
     test_presets();
     test_spawn_offsets_and_puff();
     test_rail_trail();
+    test_native_rail_ring();
     test_blur_trail();
     test_spawn_points();
     test_spawn_preset_separates();

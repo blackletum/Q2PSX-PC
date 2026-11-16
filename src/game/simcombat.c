@@ -531,30 +531,20 @@ void q2_sim_rail_trail(q2_sim *sim, const s32 start[3], const s32 end[3],
                        s32 yaw, s32 pitch, s32 roll)
 {
     /*
-     * The shooter's matrix at entity+0x2C0, applied to the ring's (1, 0, 0)
-     * and (0, 1, 0) with the Y negated after (0x800496B0, 0x800496C4). That is
-     * the same rotate-then-negate the fire functions give their muzzle
-     * offsets, which q2_weapon_muzzle_origin takes pre-negated — so the second
-     * column goes in as (0, -1, 0).
+     * The shooter's matrix at entity+0x2C0, RotMatrix of its angles
+     * (0x8003AB60), which is q2_rotation_euler element for element (the
+     * muzzle's native fixture checks it). The ring applies it with RotateS
+     * and negates Y AFTER the row's `>> 12` (0x800496B0, 0x800496C4), so it
+     * takes the matrix itself: two columns with the negation folded in, as
+     * this used to build, floored Y the other way.
      */
-    static const s16 ring_x[3] = { Q2_ONE_12, 0, 0 };
-    static const s16 ring_y[3] = { 0, -Q2_ONE_12, 0 };
-    static const s32 none[3]   = { 0, 0, 0 };
-    s32 col[3];
-    s16 basis[2][3];
-    int k;
+    s16 rot[3][3];
 
     if (!sim || !sim->fx_ready || !start || !end)
         return;
 
-    q2_weapon_muzzle_origin(ring_x, none, yaw, pitch, roll, col);
-    for (k = 0; k < 3; k++)
-        basis[0][k] = (s16)col[k];
-    q2_weapon_muzzle_origin(ring_y, none, yaw, pitch, roll, col);
-    for (k = 0; k < 3; k++)
-        basis[1][k] = (s16)col[k];
-
-    q2_fx_rail_trail(&sim->fx, start, end, (const s16 (*)[3])basis,
+    q2_rotation_euler(rot, pitch, yaw, roll);
+    q2_fx_rail_trail(&sim->fx, start, end, (const s16 (*)[3])rot,
                      sim->multiplayer, sim->player_count, rail_area_at, sim);
 }
 
@@ -2218,6 +2208,57 @@ static void projectile_owner_splash(q2_sim *sim, const q2_projectile *p,
         q2_actor_to_player(owner, &sim->combat.inv);
 }
 
+/* The fireball where the hand last was: a corpse's grenade, whose fuse runs
+ * out with nothing left to throw it (q2_sim_hand_grenade_dead). */
+static void hand_grenade_burst_in_hand(q2_sim *sim, s32 index)
+{
+    q2_projectile *p = &sim->combat.projectiles.p[index];
+    q2_actor **targets = sim->world_targets ? sim->world_targets
+                                            : sim->combat.targets;
+    u32 count = sim->world_targets ? sim->world_target_count
+                                   : sim->combat.target_count;
+    s32 where[3];
+
+    player_damage_begin(sim);
+    memcpy(where, p->pos, sizeof(where));
+    projectile_owner_splash(sim, p, where, targets, count);
+    q2_projectile_detonate_traced(&sim->combat.projectiles, (u32)index,
+                                  attacker_for(sim, p->owner), targets,
+                                  count, &sim->combat.rules,
+                                  splash_clear, sim);
+    projectile_explosion(sim, p->kind, where);
+    player_damage_end(sim);
+}
+
+q2_hand_grenade_update q2_sim_hand_grenade_dead(q2_sim *sim)
+{
+    s32 index;
+    q2_projectile *p;
+
+    if (!sim)
+        return Q2_HAND_GRENADE_NONE;
+    index = q2_projectile_hand_held_index(&sim->combat.projectiles,
+                                          sim->cur_player);
+    if (index < 0)
+        return Q2_HAND_GRENADE_NONE;
+    p = &sim->combat.projectiles.p[index];
+    if (!p->expires || sim->level_time < p->expires)
+        return Q2_HAND_GRENADE_HELD;
+    hand_grenade_burst_in_hand(sim, index);
+    return Q2_HAND_GRENADE_EXPIRED;
+}
+
+bool q2_sim_take_hand_expiry_reset(q2_sim *sim, int player)
+{
+    bool reset;
+
+    if (!sim || player < 0 || player >= Q2_SIM_MAX_PLAYERS)
+        return false;
+    reset = sim->hand_expiry_reset[player];
+    sim->hand_expiry_reset[player] = false;
+    return reset;
+}
+
 q2_hand_grenade_update q2_sim_hand_grenade_update(
     q2_sim *sim, const s32 attached_pos[3], s32 cook_dt, bool release)
 {
@@ -2228,6 +2269,7 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
     };
     s32 index;
     q2_projectile *p;
+    bool held_expiry;
 
     if (!sim || !attached_pos)
         return Q2_HAND_GRENADE_NONE;
@@ -2237,33 +2279,31 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
     if (index < 0)
         return Q2_HAND_GRENADE_NONE;
 
+    /* 0x8004A414..0x8004A460: the attachment, then the charge at 380. */
     q2_projectile_hand_update(&sim->combat.projectiles, sim->cur_player,
                               attached_pos, cook_dt);
     p = &sim->combat.projectiles.p[index];
 
-    /* The fuse is decremented before Grenade3's state dispatch. A held expiry
-     * therefore wins over a 411 release reached on the same tick. */
-    if (p->expires && sim->level_time >= p->expires) {
-        q2_actor **targets = sim->world_targets ? sim->world_targets
-                                                : sim->combat.targets;
-        u32 count = sim->world_targets ? sim->world_target_count
-                                       : sim->combat.target_count;
-        s32 where[3];
+    /*
+     * 0x8004A45C `bgtz a0` on the fuse, INSIDE the 380 arm. The fuse is
+     * decremented every think (0x8004A3DC..0x8004A3F0) but read in the held
+     * state only while the gun is pinned at 380, and `cook_dt` is non-zero on
+     * exactly those frames. It used to be read on every held tick, so a fuse
+     * that ran out in the three or so frames between letting go and the 411
+     * crossing blew up in the hand, where the console throws it and it goes
+     * off one toss later; and one that ran out at 380 burst at the attached
+     * hand, where the console throws it from the release point first.
+     *
+     * Expired at 380, 0x8004A464 sets s6 and 0x8004A46C dispatches state 2
+     * in the same think: the release below, then the state-3 toss and the
+     * fuse test (0x8004A8B8, 0x8004A998), which proj_think runs at the
+     * grenade's turn in the walk, as it does for every thrown grenade.
+     * State 2 has no fuse test of its own, so `release` throws an expired
+     * grenade too, and it goes off after that same first toss.
+     */
+    held_expiry = cook_dt > 0 && p->expires && sim->level_time >= p->expires;
 
-        player_damage_begin(sim);
-        memcpy(where, p->pos, sizeof(where));
-        projectile_owner_splash(sim, p, where, targets, count);
-        q2_projectile_detonate_traced(&sim->combat.projectiles, (u32)index,
-                                      attacker_for(sim, p->owner), targets,
-                                      count, &sim->combat.rules,
-                                      splash_clear, sim);
-        /* Grenade3 held to expiry: the fireball alone (proj_burst). */
-        projectile_explosion(sim, p->kind, where);
-        player_damage_end(sim);
-        return Q2_HAND_GRENADE_EXPIRED;
-    }
-
-    if (release) {
+    if (release || held_expiry) {
         s16 local_dir[3];
         s32 eye[3], origin[3], raw_dir[3];
         static const s32 zero[3] = { 0, 0, 0 };
@@ -2309,10 +2349,18 @@ q2_hand_grenade_update q2_sim_hand_grenade_update(
             q2_projectile_set_attitude(&sim->combat.projectiles.p[index],
                                        -(pl->pitch + 1280), -pl->yaw,
                                        pl->roll);
-            /* 0x8004A7C0: after reveal, velocity and throw sound. */
+            /* 0x8004A7C0: after reveal, velocity and throw sound. A held
+             * expiry is the same state 2, so it spends its grenade too. */
             (void)q2_weapon_consume(&sim->combat.inv,
                                     Q2_WID_HAND_GRENADE);
-            return Q2_HAND_GRENADE_RELEASED;
+            if (sim->cur_player >= 0 &&
+                sim->cur_player < Q2_SIM_MAX_PLAYERS) {
+                sim->hand_expiry_proj[sim->cur_player] =
+                    held_expiry ? (s8)(index + 1) : 0;
+                sim->hand_expiry_reset[sim->cur_player] = false;
+            }
+            return held_expiry ? Q2_HAND_GRENADE_EXPIRED
+                               : Q2_HAND_GRENADE_RELEASED;
         }
     }
 
@@ -2644,6 +2692,15 @@ static void grenade_fuse(q2_sim *sim, u32 index)
     projectile_explosion(sim, kind, where);
 }
 
+/* 0x8004A998..0x8004AA40: the fuse, and then, in the think a held expiry
+ * began (s6), the thrower's view weapon reset that follows it. */
+static void grenade_fuse_reset(q2_sim *sim, u32 index, s32 expiry_owner)
+{
+    grenade_fuse(sim, index);
+    if (expiry_owner >= 0 && expiry_owner < Q2_SIM_MAX_PLAYERS)
+        sim->hand_expiry_reset[expiry_owner] = true;
+}
+
 /* ------------------------------------------------------------------------- */
 /* 0x80047C6C: lifetime/contact decisions precede flight effects; the cached
  * hull check follows them. Full PAL/US sequences are in the bolt fixture. */
@@ -2853,6 +2910,7 @@ static void proj_think(q2_sim *sim, u32 i)
     s32 hit_index;
     s32 dir[3], contact[3];
     bool held, grenade;
+    s32 expiry_owner = -1;
     int k;
 
     if (!p->in_use)
@@ -2862,6 +2920,15 @@ static void proj_think(q2_sim *sim, u32 i)
     held = (p->kind == Q2_PROJ_HAND_GRENADE &&
             p->node == Q2_PROJ_NODE_HELD);
     grenade = p->kind == Q2_PROJ_GRENADE || p->kind == Q2_PROJ_HAND_GRENADE;
+
+    /* The think a held expiry began (q2_sim_hand_grenade_update): s6 is live
+     * for this one pass, and only the fuse arm below reads it. */
+    if (!held && p->kind == Q2_PROJ_HAND_GRENADE &&
+        p->owner >= 0 && p->owner < Q2_SIM_MAX_PLAYERS &&
+        sim->hand_expiry_proj[p->owner] == (s8)(i + 1)) {
+        expiry_owner = p->owner;
+        sim->hand_expiry_proj[p->owner] = 0;
+    }
     attacker = proj_attacker(sim, p);
     ignore = q2_projectile_ignore_owner(p, attacker) ? attacker : NULL;
 
@@ -2902,7 +2969,7 @@ static void proj_think(q2_sim *sim, u32 i)
 
     if (grenade && ((p->flags & Q2_PROJ_TOSS_STOPPED) ||
                     grenade_geometry(sim, p, &step))) {
-        if (step.expired) grenade_fuse(sim, i);
+        if (step.expired) grenade_fuse_reset(sim, i, expiry_owner);
         return;
     }
 
@@ -3262,7 +3329,7 @@ static void proj_think(q2_sim *sim, u32 i)
 
     q2_projectile_commit(&sim->combat.projectiles, i, step.to);
     /* Native Grenade2/3 decrement the fuse after movement and contact. */
-    if (grenade && step.expired) grenade_fuse(sim, i);
+    if (grenade && step.expired) grenade_fuse_reset(sim, i, expiry_owner);
 }
 
 /* The walk's turn for `slot`: the waiting projectile there, if any. */

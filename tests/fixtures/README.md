@@ -594,6 +594,26 @@ rolled and arbitrary views, and the two revisions agree.
 python -B tests/fixtures/generate_muzzle_reference.py .install/disc/game.cue '<US-disc.cue>' --trace .agents/tmp/functional-parity/muzzle/native.json
 ```
 
+## Native rail ring
+
+`generate_rail_reference.py` verifies the PAL/US executable hashes, builds
+the shooter's matrix at object+0x2C0 with the retail RotMatrix (`0x80089E38`)
+and runs AnyoneFireInstantRail's ring loop from `0x80049678` to its exit at
+`0x80049758`. The rcossin lookup (`0x800A5430`), RotateS (`0x8006FC1C`) on
+(cos, sin, 0) in place, the Y negation (`0x800496C4`), the `>> 2` offsets and
+the `>> 10` drifts all execute unchanged. The ring vector is read at
+`0x800496D0`, and the generator checks the offsets and drifts against it.
+There are 384 shooters per revision (level, pitched, rolled and arbitrary),
+spread over the single-player spacing (30 to a segment, one turn) and both
+multiplayer ones (15, one or two turns), and the two revisions agree.
+
+`test_effect` checks `q2_fx_rail_ring` against every vector and
+`q2_rotation_euler` against every matrix.
+
+```powershell
+python -B tests/fixtures/generate_rail_reference.py .install/disc/game.cue '<US-disc.cue>' --trace .agents/tmp/functional-parity/rail/native.json --check
+```
+
 ## Native level VRAM
 
 `generate_vram_reference.py` runs each level-table map's retail load (the heap

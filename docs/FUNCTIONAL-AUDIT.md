@@ -2467,17 +2467,38 @@ pick a different body, and when the start lies inside both cylinders the last
 in the list wins. Closing it wants a per-frame append model shared by the
 walk clip and the shot lists; it is not attempted here.
 
-**Also found, not corrected.** Grenade3's held arm tests its fuse only while
-the gun's position is 380 (0x8004A42C..0x8004A45C), where the port tests it
-every tick (`q2_sim_hand_grenade_update`), so in the roughly three frames
-between letting go and the 411 crossing the console throws an expired
-grenade, which goes off one toss later, and the port blows it up in the hand.
-On a held expiry the console also re-runs the state-2 setup (release point
-0x8004A58C..0x8004A668, toss 0x8004A8B8) before the fuse test, where the port
-detonates at the attached hand. The rail ring negates Y after RotateS's
-`>> 12` (0x800496C4); `q2_fx_rail_trail` folds the negation into the basis
-first, floor(-x) against the console's -floor(x), one unit before the ring's
-`>> 2` and `>> 10`.
+**Also found, corrected later on 16 November.** Grenade3's held arm tests its
+fuse only while the gun's position is 380 (0x8004A42C..0x8004A45C). The port
+tested it every tick (`q2_sim_hand_grenade_update`), so in the roughly three
+frames between letting go and the 411 crossing it blew an expired grenade up
+in the hand, where the console throws it and it goes off one toss later. On a
+held expiry the console sets s6 and re-runs the think at state 2 (release
+point 0x8004A58C..0x8004A668, throw sound, ammo at 0x8004A7C0, toss
+0x8004A8B8) before the fuse test at 0x8004A998, where the port detonated at the
+attached hand. The update now reads the fuse only on a frame that ends at 380
+(`cook_dt` is non-zero then and only then) and throws an expired grenade
+through the ordinary release. Its first think in the walk tosses it and sets it
+off, as for any thrown grenade. The view weapon's reset (0x8004AA1C) is
+carried to that think and applied only when the fuse arm fires. An actor met
+on the toss leaves through 0x8004A974, past the reset. The rail ring negates Y
+after RotateS's `>> 12` (0x800496C4). `q2_fx_rail_trail` folded the negation
+into its basis first, which gave floor(-x) where the console gives -floor(x),
+one unit before the ring's `>> 2` and `>> 10`. It now takes the shooter's
+RotMatrix and runs RotateS's rows before negating (`q2_fx_rail_ring`).
+`generate_rail_reference.py` executes the ring loop
+(0x80049678..0x80049758) on both discs, and `test_effect` matches all 7,680
+vectors. The folded order got 7,111 of them wrong; 1,766 survive the `>> 2`,
+110 change a stored offset and 5 a drift. 40-frame headless WASTE2 rail
+captures are pixel-identical before and after on both discs.
+
+**Found while correcting it, not corrected.** The think's first lines free a
+held grenade whose owner is dead: 0x8004A398 `lh v0, 264(s3)` reads the owner's
+health, a non-positive value clears s3 (0x8004A3A0, 0x8004A3BC), and with s3
+clear any state but 3 reaches KillModel (0x8004A3D4 to 0x8004A96C, 0x8006D280)
+with no blast. The 16 November split-screen fix (`f196a4d`) instead lets a
+corpse's grenade go off on its own fuse, and the brief for this correction
+asked for that to be kept, so `q2_sim_hand_grenade_dead` keeps it. By this
+reading the console makes no blast at all.
 
 **The zone-return creature fixtures.** The disc-backed `test_client_creatures`
 still expected a same-zone rebuild to carry a living creature's pending motion,

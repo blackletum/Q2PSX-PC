@@ -565,6 +565,21 @@ typedef struct q2_sim {
     bool                 view_plane_prev_ready[Q2_SIM_MAX_PLAYERS];
 
     /*
+     * Grenade3's held expiry, carried into the one think that follows it.
+     * The held state's fuse test at 380 sets s6 and re-enters the dispatch at
+     * state 2 (0x8004A464..0x8004A46C), and the same think runs the release,
+     * the first toss and the fuse test; only if that fuse test is what sets
+     * the grenade off does 0x8004AA0C reach the view weapon's reset. An actor
+     * met on the toss detonates it at 0x8004A948 and leaves through
+     * 0x8004A974, past the reset. `hand_expiry_proj` names the projectile
+     * (index + 1) until its next think; `hand_expiry_reset` is the reset,
+     * drained by q2_sim_take_hand_expiry_reset. Not saved: both live for
+     * less than one frame.
+     */
+    s8                   hand_expiry_proj[Q2_SIM_MAX_PLAYERS];
+    bool                 hand_expiry_reset[Q2_SIM_MAX_PLAYERS];
+
+    /*
      * Hold the missiles and the particles for q2_sim_missiles_late. QuakeLoop
      * runs every record's handler — every player's think — in MoveModels
      * (0x80038F40), and only then ProcessMissiles (0x80039000) and
@@ -2132,12 +2147,37 @@ typedef enum q2_hand_grenade_update {
     Q2_HAND_GRENADE_EXPIRED
 } q2_hand_grenade_update;
 
-/* Feed Grenade3 the owning view weapon's world position and model-timeline
- * outputs after q2_vw_advance. It stays hidden/attached while held, accumulates
- * 6*cook_dt charge, detonates before release if its 1650-tick fuse elapsed,
- * and otherwise releases on the 411 crossing. */
+/*
+ * Feed Grenade3 the owning view weapon's world position and model-timeline
+ * outputs after q2_vw_advance. It stays hidden and attached while held and
+ * accumulates 6*cook_dt charge. `release` is the console's state 2, the
+ * think after the 411 crossing: the grenade is thrown whatever its fuse says
+ * (RELEASED), and an elapsed fuse sets it off after its first toss, in its
+ * own think.
+ *
+ * THE HELD FUSE IS READ ONLY AT 380. 0x8004A42C..0x8004A45C test the fuse
+ * inside the `position == 380` arm, and `cook_dt` is non-zero on exactly the
+ * frames that end there (q2_vw_take_hand_grenade_cook), so it doubles as that
+ * test. Expired there, the think runs state 2 at once (EXPIRED): the same
+ * release point, charge, cell, attitude, ammo and throw sound as a 411 throw,
+ * but no pad shock, and the fuse goes off after the first toss.
+ * q2_sim_take_hand_expiry_reset then says whether the view weapon is reset
+ * (0x8004AA0C). Between leaving 380 and the 411 crossing the fuse is not
+ * read at all, so a grenade that expires there is thrown and goes off one toss
+ * later, never in the hand.
+ */
 q2_hand_grenade_update q2_sim_hand_grenade_update(
     q2_sim *sim, const s32 attached_pos[3], s32 cook_dt, bool release);
+
+/* Whether `player`'s held expiry went off on its fuse, so the view weapon
+ * takes 0x8004AA1C's reset (q2_vw_hand_grenade_expired). Drains it. */
+bool q2_sim_take_hand_expiry_reset(q2_sim *sim, int player);
+
+/* A held grenade in the hand of a player whose think has stopped (a corpse):
+ * no position, cook or release reaches it. The 16 November behaviour: it
+ * goes off where the hand last was once its fuse has elapsed. Returns
+ * EXPIRED when it went off, HELD while it waits, NONE with no grenade. */
+q2_hand_grenade_update q2_sim_hand_grenade_dead(q2_sim *sim);
 
 /*
  * The rail's spiral from `start` to `end` (q2_fx_rail_trail), turned by the

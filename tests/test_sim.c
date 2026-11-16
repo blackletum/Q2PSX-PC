@@ -3306,7 +3306,86 @@ static void test_held_hand_grenade(void)
     check_eq_i(q2_projectile_hand_held_index(&sim.combat.projectiles, 0), -1,
                "rather than orphaning a held state no model can drive");
 
-    /* Fuse expiry wins over release and hurts the owner at the hand. */
+    /*
+     * THE HELD FUSE IS READ ONLY AT 380 (0x8004A42C..0x8004A45C). Each case
+     * primes a fresh grenade and lets its fuse run out before the update.
+     */
+    {
+        int c;
+
+        for (c = 0; c < 3; c++) {
+            /* 0: past 380, short of 411 (no cook, no release) — held on.
+             * 1: the think after the 411 crossing (state 2) — thrown anyway.
+             * 2: pinned at 380 (cook) — the held expiry, state 2 at once. */
+            static const char *const what[3] = {
+                "between 380 and 411", "on the 411 release", "pinned at 380"
+            };
+            u32 fused;
+            char line[96];
+
+            q2_sim_init(&sim, NULL, 50);
+            q2_sim_spawn(&sim, spawn, 0);
+            sim.fire_from_input = false;
+            sim.combat.weapon_id = Q2_WID_HAND_GRENADE;
+            sim.combat.inv.weapons |= wt->owned_bit[Q2_WID_HAND_GRENADE];
+            sim.combat.inv.ammo[Q2_AMMO_GRENADES] = 3;
+            fire = q2_sim_fire(&sim);
+            h = q2_projectile_hand_held_index(&sim.combat.projectiles, 0);
+            snprintf(line, sizeof(line), "%s: a held grenade to expire", what[c]);
+            check(h >= 0, line);
+            if (h < 0)
+                continue;
+            sim.level_time = sim.combat.projectiles.p[h].expires;
+            q2_sim_eye(&sim, eye);
+
+            if (c == 0) {
+                check_eq_i(q2_sim_hand_grenade_update(&sim, attached, 0, false),
+                           Q2_HAND_GRENADE_HELD,
+                           "an expired fuse off 380 is not read: still held");
+                check_eq_i(q2_projectile_hand_held_index(&sim.combat.projectiles, 0),
+                           h, "and still in the hand, unexploded");
+                check_eq_i(sim.combat.inv.health, 100, "with nobody hurt");
+                check_eq_i(q2_sim_hand_grenade_update(&sim, attached, 0, true),
+                           Q2_HAND_GRENADE_RELEASED,
+                           "then the 411 release throws it");
+                continue;
+            }
+
+            check_eq_i(q2_sim_hand_grenade_update(&sim, attached,
+                                                  c == 2 ? 12 : 0, c == 1),
+                       c == 2 ? Q2_HAND_GRENADE_EXPIRED
+                              : Q2_HAND_GRENADE_RELEASED,
+                       c == 2 ? "an expired fuse at 380 is a held expiry"
+                              : "an expired fuse does not stop state 2's throw");
+            snprintf(line, sizeof(line), "%s: thrown, not burst in the hand", what[c]);
+            check_eq_i(q2_projectile_hand_held_index(&sim.combat.projectiles, 0),
+                       -1, line);
+            check_eq_i(sim.combat.projectiles.live, 1, "it is in flight");
+            check_eq_i(sim.combat.projectiles.p[h].pos[2] - eye[2],
+                       Q2_HAND_GRENADE_RELEASE_FORWARD,
+                       "from the release point, not the attached hand");
+            check_eq_i(sim.combat.inv.ammo[Q2_AMMO_GRENADES], 2,
+                       "and state 2 spends the grenade (0x8004A7C0)");
+            check_eq_i(sim.combat.inv.health, 100, "nothing has gone off yet");
+            check(!q2_sim_take_hand_expiry_reset(&sim, 0),
+                  "nor has the view weapon been reset");
+
+            fused = q2_sim_proj_scan.expired;
+            q2_sim_combat_tick(&sim);
+            check_eq_i(q2_sim_proj_scan.expired - fused, 1,
+                       "its own think tosses it once and the fuse sets it off");
+            check_eq_i(sim.combat.projectiles.live, 0, "and it is gone");
+            check(sim.combat.inv.health < 100, "the blast reaches the thrower");
+            snprintf(line, sizeof(line), "%s: %s", what[c],
+                     c == 2 ? "the fuse then resets the view weapon (0x8004AA0C)"
+                            : "a 411 throw never resets the view weapon");
+            check(q2_sim_take_hand_expiry_reset(&sim, 0) == (c == 2), line);
+            check(!q2_sim_take_hand_expiry_reset(&sim, 0), "drained once");
+        }
+    }
+
+    /* A corpse's grenade: no position, cook or release reaches it, and it
+     * goes off in place once the fuse has run out (16 November). */
     q2_sim_init(&sim, NULL, 50);
     q2_sim_spawn(&sim, spawn, 0);
     sim.fire_from_input = false;
@@ -3315,17 +3394,17 @@ static void test_held_hand_grenade(void)
     sim.combat.inv.ammo[Q2_AMMO_GRENADES] = 3;
     fire = q2_sim_fire(&sim);
     h = q2_projectile_hand_held_index(&sim.combat.projectiles, 0);
-    check(h >= 0, "a second held grenade exists for the fuse test");
-    sim.level_time = sim.combat.projectiles.p[h].expires;
-    check_eq_i(q2_sim_hand_grenade_update(&sim, attached, 0, true),
-               Q2_HAND_GRENADE_EXPIRED,
-               "an elapsed held fuse wins over release");
-    check_eq_i(sim.combat.projectiles.live, 0,
-               "and consumes the hidden projectile");
-    check_eq_i(sim.combat.inv.ammo[Q2_AMMO_GRENADES], 3,
-               "without charging ammo for a grenade never thrown");
-    check(sim.combat.inv.health < 100,
-          "the in-hand blast damages its owner");
+    check(h >= 0, "a held grenade for the dead hand");
+    if (h >= 0) {
+        check_eq_i(q2_sim_hand_grenade_dead(&sim), Q2_HAND_GRENADE_HELD,
+                   "a dead hand's grenade waits for its fuse");
+        sim.level_time = sim.combat.projectiles.p[h].expires;
+        check_eq_i(q2_sim_hand_grenade_dead(&sim), Q2_HAND_GRENADE_EXPIRED,
+                   "and goes off when it runs out");
+        check_eq_i(sim.combat.projectiles.live, 0, "where the hand was");
+        check_eq_i(sim.combat.inv.ammo[Q2_AMMO_GRENADES], 3,
+                   "never thrown, so never spent");
+    }
 }
 
 

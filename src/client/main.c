@@ -12546,6 +12546,12 @@ static void client_advance_view_weapon(client *c, bool attack, s32 ticks)
 
     client_sound_requests_init(c);
 
+    /* In a multiplayer frame the projectiles think inside q2_sim_advance,
+     * before this: a held expiry's fuse lands there, and its reset reaches
+     * the view weapon before the driver reads it, as on the console. */
+    if (q2_sim_take_hand_expiry_reset(&c->sim[0], pi))
+        q2_vw_hand_grenade_expired(&c->vw[pi]);
+
     if (!c->death[pi].linked_weapon || c->sim[0].combat.inv.health <= 0)
         return;
 
@@ -12614,8 +12620,9 @@ static void client_advance_view_weapon(client *c, bool attack, s32 ticks)
 
         /* Grenade3 is a hidden entity attached to the view weapon until the
          * model timeline crosses 411. Retail copies viewmodel+0xA4 every think
-         * (0x8004A414), charges only while position 380 is pinned, and lets an
-         * elapsed fuse force fire frame 2. Feed that entity after advancing the
+         * (0x8004A414), charges and reads its fuse only while position 380 is
+         * pinned, and an elapsed fuse there throws it at once and, once it has
+         * gone off, forces fire frame 2. Feed that entity after advancing the
          * model so both the attachment and its crossing are from this frame. */
         if (c->vw[pi].weapon == Q2_WID_HAND_GRENADE ||
             q2_projectile_hand_held_index(&c->sim[0].combat.projectiles, pi) >= 0) {
@@ -12639,8 +12646,13 @@ static void client_advance_view_weapon(client *c, bool attack, s32 ticks)
                         aim, kick, attached, NULL);
             state = q2_sim_hand_grenade_update(&c->sim[0], attached,
                                                 cook_ticks, release);
+            /* A held expiry at 380 is state 2 without the 411 crossing, so
+             * its throw sound (0x8004A798, wep_hgrent1a) comes from here,
+             * not from the crossing; and no pad shock, which is the
+             * crossing's alone (0x8004A52C). The view weapon's reset waits
+             * for the fuse (q2_sim_take_hand_expiry_reset). */
             if (state == Q2_HAND_GRENADE_EXPIRED)
-                q2_vw_hand_grenade_expired(&c->vw[pi]);
+                c->vw[pi].frame_sound = Q2_WSND_HANDGREN_THROW;
             /* 0x8004A52C: the held entity's release shakes the thrower's pad
              * with ShockData_GrenadeThrow, after the throw sound. */
             if (state == Q2_HAND_GRENADE_RELEASED)
@@ -13825,14 +13837,7 @@ static void client_input_simulated(client *c, float dt)
                  * tick of their next life, at the spawn point, as a suicide.
                  * No cook and no release: neither reaches a corpse.
                  */
-                s32 held = q2_projectile_hand_held_index(
-                    &c->sim[0].combat.projectiles, pi);
-                if (held >= 0) {
-                    s32 at[3];
-                    memcpy(at, c->sim[0].combat.projectiles.p[held].pos,
-                           sizeof(at));
-                    q2_sim_hand_grenade_update(&c->sim[0], at, 0, false);
-                }
+                (void)q2_sim_hand_grenade_dead(&c->sim[0]);
             }
             if (ticked && c->death[pi].stage == Q2_PDEATH_ALIVE &&
                 c->sim[0].combat.inv.health > 0)
@@ -14481,7 +14486,14 @@ static void client_input_simulated(client *c, float dt)
      */
     if (ticked) {
         u32 before = c->lights_ready ? c->light_world.dynamic_world_count : 0;
+        int hp;
         q2_sim_entities_end(&c->sim[0]);
+        /* A held expiry's grenade went off on its fuse in the walk: the
+         * view weapon reset its think writes (0x8004AA1C), before the gun
+         * is drawn this frame. */
+        for (hp = 0; hp < Q2_MP_MAX_PLAYERS; hp++)
+            if (q2_sim_take_hand_expiry_reset(&c->sim[0], hp))
+                q2_vw_hand_grenade_expired(&c->vw[hp]);
         client_entity_events(c);
         /* What the sweep lit is held to the next tick with the rest. */
         if (c->lights_ready) {

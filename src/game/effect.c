@@ -1309,8 +1309,29 @@ s32 q2_fx_sqrt_nr(u32 n)
     return root;
 }
 
+void q2_fx_rail_ring(const s16 rot[3][3], s32 angle, s16 out[3])
+{
+    s32 cs = q2_cos12(angle & 0xFFF), sn = q2_sin12(angle & 0xFFF);
+    int k;
+
+    /*
+     * 0x8004968C..0x800496B4 put (cos, sin, 0) at +0x54 and RotateS
+     * (0x8006FC1C) turns it in place by the shooter's matrix: each row an
+     * arithmetic `>> 12`, stored as a halfword. 0x800496C4 then negates the
+     * stored Y. So Y is -floor(row), not floor(-row): folding the negation
+     * into the matrix first, as this used to, put Y one unit further down
+     * whenever the row was not a whole number, before the `>> 2` and
+     * `>> 10` that follow.
+     */
+    for (k = 0; k < 3; k++) {
+        s16 v = (s16)(((s32)rot[k][0] * cs + (s32)rot[k][1] * sn) >> 12);
+
+        out[k] = k == 1 ? (s16)-v : v;
+    }
+}
+
 u32 q2_fx_rail_trail(q2_fx_world *w, const s32 start[3], const s32 end[3],
-                     const s16 basis[2][3], bool multiplayer, int windows,
+                     const s16 rot[3][3], bool multiplayer, int windows,
                      u8 (*area_at)(void *user, const s32 at[3]), void *user)
 {
     s16 offs[Q2_FX_RAIL_PER_SEG][3], vel[Q2_FX_RAIL_PER_SEG][3];
@@ -1321,7 +1342,7 @@ u32 q2_fx_rail_trail(q2_fx_world *w, const s32 start[3], const s32 end[3],
     int i, k;
     u8 area;
 
-    if (!w || !start || !end || !basis)
+    if (!w || !start || !end || !rot)
         return 0;
 
     for (k = 0; k < 3; k++)
@@ -1350,14 +1371,12 @@ u32 q2_fx_rail_trail(q2_fx_world *w, const s32 start[3], const s32 end[3],
 
     astep = (turns << 12) / per;
     for (i = 0; i < per; i++, angle += astep) {
-        s32 cs = q2_cos12(angle & 0xFFF), sn = q2_sin12(angle & 0xFFF);
+        s16 v[3];
 
+        q2_fx_rail_ring(rot, angle, v);
         for (k = 0; k < 3; k++) {
-            s16 v = (s16)(((s32)basis[0][k] * cs +
-                           (s32)basis[1][k] * sn) >> Q2_FRAC_12);
-
-            offs[i][k] = (s16)(offs[i][k] + (v >> Q2_FX_RAIL_RING_SHIFT));
-            vel[i][k]  = (s16)(v >> Q2_FX_RAIL_DRIFT_SHIFT);
+            offs[i][k] = (s16)(offs[i][k] + (v[k] >> Q2_FX_RAIL_RING_SHIFT));
+            vel[i][k]  = (s16)(v[k] >> Q2_FX_RAIL_DRIFT_SHIFT);
         }
     }
 

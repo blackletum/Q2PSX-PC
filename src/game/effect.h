@@ -1531,8 +1531,10 @@ s32 q2_fx_bolt_trail(q2_fx_world *w, q2_rng *rng, const s32 at[3],
  * (0x800497C4); the last raises only the first fifteen, at size 6000 rather
  * than 7000. Every group is ramp 0 at both ends, the blue one, for 16 ticks.
  *
- * `basis` is the shooter's matrix's first two columns with the Y row negated,
- * in 1.12: what `ring` (1, 0) and (0, 1) become. `area_at` names the draw area
+ * `rot` is the shooter's matrix, RotMatrix's rows in 1.12 (q2_rotation_euler
+ * of its pitch, yaw and roll; the muzzle's q2_weapon_muzzle_origin builds the
+ * same one). q2_fx_rail_ring is one particle's `vel[i]` before the shifts:
+ * RotateS's floored rows, and only then the Y negated. `area_at` names the draw area
  * for a segment's origin — the console walks the trace's own area list to the
  * last entry behind it (0x80049850..0x80049914), which is the area of the cell
  * holding that point.
@@ -1550,8 +1552,11 @@ s32 q2_fx_bolt_trail(q2_fx_world *w, q2_rng *rng, const s32 at[3],
 #define Q2_FX_RAIL_DRIFT_SHIFT   10     /* 0x80049728 `sra 26` of a halfword */
 
 u32 q2_fx_rail_trail(q2_fx_world *w, const s32 start[3], const s32 end[3],
-                     const s16 basis[2][3], bool multiplayer, int windows,
+                     const s16 rot[3][3], bool multiplayer, int windows,
                      u8 (*area_at)(void *user, const s32 at[3]), void *user);
+
+/* The ring vector for `angle` (4096 a turn): 0x8004968C..0x800496CC. */
+void q2_fx_rail_ring(const s16 rot[3][3], s32 angle, s16 out[3]);
 
 /* ------------------------------------------------------------------------- */
 /* The per-actor presentation pass — 0x8005B880                               */
