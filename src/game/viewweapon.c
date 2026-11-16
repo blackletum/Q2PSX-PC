@@ -1108,11 +1108,13 @@ static void hand_grenade_think(q2_viewweapon *vw, s32 dt)
         vw->hand_prev_anim < Q2_VW_HAND_PRIME_POSITION)
         vw->frame_sound = Q2_WSND_HANDGREN_PRIME;
 
-    /* 0x8004A4A8…0x8004A4D0: thrown — state 2, and this think ends. */
+    /* 0x8004A4A8…0x8004A4D0: thrown — state 2, and this think ends. The
+     * crossing shakes the pad (0x8004A52C, the caller's on hand_release);
+     * the throw sample is state 2's own (0x8004A798), the next think's, so
+     * it is not raised here. */
     if (pos >= Q2_VW_HAND_RELEASE_POSITION &&
         vw->hand_prev_anim < Q2_VW_HAND_RELEASE_POSITION) {
         vw->hand_release = true;
-        vw->frame_sound  = Q2_WSND_HANDGREN_THROW;
         vw->hand_live    = false;
     }
 

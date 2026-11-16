@@ -886,8 +886,8 @@ static void test_grenade_cook_waits_for_the_arm(void)
           "crossing 411 releases Grenade3");
     CHECK(!q2_vw_take_hand_grenade_release(&vw),
           "the release crossing is a drained one-shot");
-    CHECK(q2_vw_take_frame_sound(&vw) == Q2_WSND_HANDGREN_THROW,
-          "and crossing 411 plays the throw sample");
+    CHECK(q2_vw_take_frame_sound(&vw) != Q2_WSND_HANDGREN_THROW,
+          "but the throw sample is state 2's, the next think's (0x8004A798)");
     CHECK(!vw.hand_live, "and the thrown grenade no longer thinks as held");
 
     /* 0x80050404: a trigger pressed again after the arm has passed 380 does
@@ -1432,16 +1432,11 @@ static void nat_compare(nat_ctx *cx, q2_viewweapon *vw, bool swapped)
     got[n] = q2_vw_result(vw);            want[n++] = c->result;
     got[n] = vw->switch_ticks;            want[n++] = c->countdown > 0 ? c->countdown : 0;
     got[n] = vw->hyper_ramp;              want[n++] = c->ramp;
-    /* The frame driver's sound, or the held grenade's prime; a throw's own
-     * sample is the port's (the console's lives in the flight branch, which
-     * the fixture does not execute), so it stands in for whatever came
-     * before it. */
-    if (c->released && snd == Q2_WSND_HANDGREN_THROW) {
-        got[n] = 0;                       want[n++] = 0;
-    } else {
-        got[n] = snd == Q2_WSND_HANDGREN_PRIME ? 5 : nat_sound(snd);
-        want[n++] = c->sound ? c->sound : c->primes ? 5 : 0;
-    }
+    /* The frame driver's sound, or the held grenade's prime. The throw's
+     * sample is state 2's (0x8004A798), a think after the crossing the
+     * fixture stops at, so a crossing frame carries no sound of its own. */
+    got[n] = snd == Q2_WSND_HANDGREN_PRIME ? 5 : nat_sound(snd);
+    want[n++] = c->sound ? c->sound : c->primes ? 5 : 0;
     got[n] = q2_vw_take_quad_sound(vw);   want[n++] = c->quad > 0;
     got[n] = swapped;                     want[n++] = c->models > 0;
     got[n] = vw->anim_pos;                want[n++] = c->anim_pos;

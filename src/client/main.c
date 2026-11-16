@@ -12557,6 +12557,7 @@ static void client_advance_view_weapon(client *c, bool attack, s32 ticks)
 
     if (c->vm_ready) {
         bool swapped;
+        bool hg_throw_sound = false;
 
         /* PrimaryQuakePlayer acquired and eased this on the logic tick. */
         q2_vw_set_aim_assist(&c->vw[pi], c->sim[0].player[pi].aim_assist);
@@ -12646,18 +12647,24 @@ static void client_advance_view_weapon(client *c, bool attack, s32 ticks)
                         aim, kick, attached, NULL);
             state = q2_sim_hand_grenade_update(&c->sim[0], attached,
                                                 cook_ticks, release);
-            /* A held expiry at 380 is state 2 without the 411 crossing, so
-             * its throw sound (0x8004A798, wep_hgrent1a) comes from here,
-             * not from the crossing; and no pad shock, which is the
-             * crossing's alone (0x8004A52C). The view weapon's reset waits
-             * for the fuse (q2_sim_take_hand_expiry_reset). */
-            if (state == Q2_HAND_GRENADE_EXPIRED)
-                c->vw[pi].frame_sound = Q2_WSND_HANDGREN_THROW;
-            /* 0x8004A52C: the held entity's release shakes the thrower's pad
-             * with ShockData_GrenadeThrow, after the throw sound. */
-            if (state == Q2_HAND_GRENADE_RELEASED)
+            /*
+             * TWO FRAMES, IN THIS ORDER. The 411 crossing is the held
+             * think's: it sets state 2 and shakes the thrower's pad with
+             * ShockData_GrenadeThrow there and then (0x8004A4D0..0x8004A52C),
+             * and the think ends. The throw sample, wep_hgrent1a, is state
+             * 2's, played in the NEXT think as the grenade leaves
+             * (0x8004A798, 0x8007270C), the frame `release` arrives here. A
+             * held expiry at 380 is state 2 without a crossing: the sample
+             * and no shock. The port had them the other way round, the
+             * sample on the crossing and the shock a frame later.
+             */
+            if (c->hg_release_pending[pi] &&
+                q2_projectile_hand_held_index(&c->sim[0].combat.projectiles,
+                                              pi) >= 0)
                 client_shock(c, pi, Q2_SHOCK_GRENADE_THROW, Q2_SHOCK_FULL,
                              NULL, 0, 0);
+            hg_throw_sound = state == Q2_HAND_GRENADE_RELEASED ||
+                             state == Q2_HAND_GRENADE_EXPIRED;
         }
 
         {
@@ -12673,6 +12680,18 @@ static void client_advance_view_weapon(client *c, bool attack, s32 ticks)
                 if (wt->sound[snd][0])
                     client_play_player_sound(c, wt->sound[snd],
                         client_request_for_sound(wt->sound[snd], c), pi);
+            }
+
+            /* Grenade3's state-2 sample, after the driver's: the grenade's
+             * think runs after the player's. Played in its own right, so it
+             * does not displace a band sound raised in the same frame. */
+            if (hg_throw_sound) {
+                const q2_weapon_tables *wt = q2_weapon_tables_builtin();
+                const char *name = wt->sound[Q2_WSND_HANDGREN_THROW];
+
+                if (name[0])
+                    client_play_player_sound(c, name,
+                        client_request_for_sound(name, c), pi);
             }
 
             /*

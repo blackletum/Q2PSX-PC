@@ -2501,6 +2501,14 @@ now frees it with no blast on the corpse branch's first tick. The client also
 drops a 411 throw still pending, so it cannot release the next life's first
 grenade.
 
+**And the throw's two outputs, swapped.** The 411 crossing is the held
+think's, and it shakes the pad there (0x8004A4D0..0x8004A52C). The throw
+sample is state 2's, the next think's (0x8004A798). The port had the sample on
+the crossing (the view weapon's frame sound) and the shock on the release. The
+crossing now raises the shock and the release plays the sample, as its own
+request. The view-weapon driver fixture no longer has to excuse a throw sample
+on the crossing frame.
+
 **The zone-return creature fixtures.** The disc-backed `test_client_creatures`
 still expected a same-zone rebuild to carry a living creature's pending motion,
 a Jorg rider's pending launch and a Medic's enemy, the behaviour `d82c55d`

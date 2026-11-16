@@ -702,6 +702,70 @@ static void test_disc_autoaim(const char *disc, const char *output)
     close_client(c);
 }
 
+/* Active voices playing `body`, the throw sample's ADPCM. */
+static int voices_playing(const client *c, const u8 *body)
+{
+    int i, n = 0;
+    for (i = 0; i < (int)Q2PSX_ARRAY_COUNT(c->voice); i++)
+        if (c->voice[i].active && c->voice[i].spu.dec.adpcm == body)
+            n++;
+    return n;
+}
+
+/*
+ * THE THROW TAKES TWO FRAMES, SHOCK FIRST. Grenade3's held think shakes the
+ * pad on the 411 crossing (0x8004A4D0..0x8004A52C) and ends; the next think,
+ * state 2, plays wep_hgrent1a as the grenade leaves (0x8004A798). A real
+ * client primes, cooks and lets go of a hand grenade on BOSS2 with the
+ * disc's own clips, and the frame of each is recorded.
+ */
+static void test_disc_hand_throw_order(const char *disc)
+{
+    client *c = open_client(disc);
+    q2_vag throw_vag;
+    int i, shock_frame = -1, sound_frame = -1, release_frame = -1;
+    u32 shocks;
+
+    CHECK(client_load_zone(c, "BOSS2", 0));
+    c->sim[0].combat.inv.weapons = 0xFFFF;
+    for (i = 0; i < Q2_AMMO_COUNT; i++) c->sim[0].combat.inv.ammo[i] = 500;
+    c->sim[0].combat.weapon_id = Q2_WID_HAND_GRENADE;
+    c->sim[0].combat.inv.current_weapon = (s8)Q2_WID_HAND_GRENADE;
+    client_reset_view_model(c, 0);
+    CHECK(c->vw_model_ready[0]);
+    CHECK(client_find_sound(c, q2_weapon_tables_builtin()->sound[Q2_WSND_HANDGREN_THROW],
+                            &throw_vag));
+    for (i = 0; i < 120 && c->vw[0].state != Q2_VM_IDLE; i++) {
+        client_advance_view_weapon(c, false, 10);
+        client_audio_pump(c, 1.0 / 30.0);
+    }
+    CHECK(c->vw[0].state == Q2_VM_IDLE);
+    shocks = c->shock_by_id[Q2_SHOCK_GRENADE_THROW];
+    for (i = 0; i < 160; i++) {
+        int before = voices_playing(c, throw_vag.body);
+        bool held = q2_projectile_hand_held_index(&c->sim[0].combat.projectiles, 0) >= 0;
+
+        /* Prime and cook, then let go. */
+        client_advance_view_weapon(c, i < 40, 10);
+        if (shock_frame < 0 && c->shock_by_id[Q2_SHOCK_GRENADE_THROW] != shocks)
+            shock_frame = i;
+        if (sound_frame < 0 && voices_playing(c, throw_vag.body) > before)
+            sound_frame = i;
+        if (release_frame < 0 && held &&
+            q2_projectile_hand_held_index(&c->sim[0].combat.projectiles, 0) < 0)
+            release_frame = i;
+        client_audio_pump(c, 1.0 / 30.0);
+    }
+    printf("hand throw: shock frame %d, release %d, throw sound %d\n",
+           shock_frame, release_frame, sound_frame);
+    CHECK(shock_frame >= 0 && release_frame >= 0 && sound_frame >= 0);
+    CHECK(c->shock_by_id[Q2_SHOCK_GRENADE_THROW] == shocks + 1);
+    CHECK(release_frame == shock_frame + 1);
+    CHECK(sound_frame == release_frame);
+    CHECK(c->voice_dropped == 0);
+    close_client(c);
+}
+
 int main(int argc, char **argv)
 {
     test_all_weapons();
@@ -710,8 +774,10 @@ int main(int argc, char **argv)
     test_automatic_exhaustion();
     test_frame_result_is_consumed();
     test_player_autoaim();
-    if (argc == 4 && !strcmp(argv[1], "--headless-grenade"))
+    if (argc == 4 && !strcmp(argv[1], "--headless-grenade")) {
         test_disc_grenade(argv[2], argv[3]);
+        test_disc_hand_throw_order(argv[2]);
+    }
     if (argc == 4 && !strcmp(argv[1], "--headless-projectile-contact"))
         test_disc_projectile_contact(argv[2], argv[3]);
     if (argc == 4 && !strcmp(argv[1], "--headless-bolt"))
