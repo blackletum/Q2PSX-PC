@@ -38,7 +38,11 @@ def require(condition, message):
 def run_case(client, disc, output, name, players=0, split=None, weapon=2,
              frames=120, fight=False, crosshair=False):
     shot = output / f"{name}.ppm"
-    capture = (output / f"{name}_{((frames - 1) // 30) * 30:04d}.ppm"
+    # The fight reports every ten frames: a staged kill can be answered by a
+    # respawn inside one thirty-frame window (it is on the USA disc), and the
+    # dead-weapon check needs a report taken while the body is down.
+    every = 10
+    capture = (output / f"{name}_{((frames - 1) // every) * every:04d}.ppm"
                if fight else shot)
     if capture.exists():
         capture.unlink()
@@ -52,7 +56,7 @@ def run_case(client, disc, output, name, players=0, split=None, weapon=2,
     if players and not fight:
         args += ["--crosshair" if crosshair else "--no-crosshair"]
     if fight:
-        args += ["--dm-stage", "--demo", "--shot-every", "30"]
+        args += ["--dm-stage", "--demo", "--shot-every", str(every)]
     else:
         args += ["--weapon", str(weapon), "--armour", "body"]
     result = subprocess.run(args, cwd=ROOT, capture_output=True, timeout=120)
@@ -145,7 +149,11 @@ def main():
             "put captures under this repository's .agents/tmp directory")
     output.mkdir(parents=True, exist_ok=True)
     records = []
-    single, _ = run_case(client, disc, output, "single")
+    single, single_log = run_case(client, disc, output, "single")
+    # The USA disc's world steps 10 of the console's 1/300 s units a frame
+    # where PAL steps 12, so the staged fight needs a fifth more frames to
+    # reach the same kill; at 301 it ends with player 1 still standing.
+    ntsc = "NTSC" in single_log or "SLUS" in single_log
     records.append(single)
     if args.baseline:
         baseline, _ = run_case(args.baseline.resolve(), disc, output, "baseline-single")
@@ -170,10 +178,17 @@ def main():
         records.append(record)
 
     fight, log = run_case(client, disc, output, "fight", 2, "horizontal",
-                         frames=301, fight=True)
+                         frames=361 if ntsc else 301, fight=True)
     dead_views = [(int(p), int(n)) for p, _, n, _, live in WEAPON.findall(log)
                   if live == "0"]
-    require("player 1 died:" in log and (1, 0) in dead_views,
+    # A gib has no body to wait on, and the staged harness respawns the extra
+    # players as soon as they are not DYING, so a gibbing kill (the one the
+    # USA disc's fight ends on) comes back on its death frame and no report
+    # can see the empty hands. Then the evidence is the respawn rebuilding
+    # the weapon, which only happens to one that was taken away.
+    died = log.find("player 1 died:")
+    rebuilt = died >= 0 and "view weapon: player 1 " in log[died:]
+    require(died >= 0 and ((1, 0) in dead_views or rebuilt),
             "fight did not exercise removal of the second player's weapon")
     require(all(n == 0 for _, n in dead_views), "a dead viewport retained a weapon")
     require(fight["weapons"][0][3] == 1 and fight["weapons"][0][1] > 0,

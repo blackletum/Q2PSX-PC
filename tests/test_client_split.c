@@ -645,10 +645,16 @@ static void test_rounds_and_cameras(void)
     client_score_deaths(c);
     CHECK(c->mp.end == Q2_MP_END_MATCH_OVER && c->mp.team_frags[0] == 2);
     c->sim[0].player[2].pitch = 123; c->sim[0].player[2].yaw = 456;
-    client_extra_camera(c, 2);
+    client_extra_camera(c, 2, 10);
     c->sim[0].player[2].ent2_flags |= Q2_ENT2_DEAD;
     c->sim[0].player[2].pitch = 321; c->sim[0].player[2].yaw = 654;
-    for (pi = 0; pi < 200; pi++) client_extra_camera(c, 2);
+    /* An extra pane's death roll is player one's: the same `50 * dt` ease,
+     * not the flat 100 it used to take per rendered frame. */
+    client_extra_camera(c, 2, 10);
+    CHECK(c->mp_camera_angles[2][2] == (q2_pdeath_cam_roll(0, 10) & 4095));
+    for (pi = 1; pi < 20; pi++) client_extra_camera(c, 2, 10);
+    CHECK(c->mp_camera_angles[2][2] == (-384 & 4095));
+    for (pi = 0; pi < 200; pi++) client_extra_camera(c, 2, 10);
     CHECK(c->mp_camera_angles[2][0] == 123 && c->mp_camera_angles[2][1] == 456);
     CHECK(c->mp_camera_angles[2][2] == (-384 & 4095));
     CHECK(c->mp_camera_angles[1][2] == 0);
@@ -867,6 +873,177 @@ static void test_results_disc(const char *disc_path, const char *capture)
     close_client(c);
 }
 
+/* A match's pause page is the pauser's: their pad steers it, nobody else's
+ * does, and the keyboard and mouse only when player one paused. */
+static void test_pause_ownership(void)
+{
+    client *c = fixture(3);
+    u16 pad;
+
+    CHECK(client_slot_player(c, 0) == 0 && client_slot_player(c, 2) == 2);
+    CHECK(client_slot_player(c, 3) == -1);      /* a spare pad in a 3-player match */
+    c->mp_enabled = false;
+    CHECK(client_slot_player(c, 2) == 0);       /* single player: every pad is P1's */
+    c->mp_enabled = true;
+
+    q2_menu_settings_defaults(&c->settings);
+    q2_menu_init(&c->menu, &c->settings, 248);
+    q2_menu_set_multiplayer(&c->menu, true);
+    c->gamepads.id[1] = 101;
+    c->gamepads.id[2] = 102;
+    CHECK(client_pause_open(c, 1));
+    CHECK(!client_menu_player_one_owns(c));
+
+    buttons(c, 2, SDL_GAMEPAD_BUTTON_DPAD_DOWN, true);
+    buttons(c, 2, SDL_GAMEPAD_BUTTON_DPAD_DOWN, false);
+    pad = client_menu_pad(c);
+    CHECK(!(pad & Q2_PAD_DOWN));
+    CHECK(c->gamepads.menu_pressed[2] == 0);    /* drained, not left to fire later */
+
+    buttons(c, 1, SDL_GAMEPAD_BUTTON_DPAD_DOWN, true);
+    buttons(c, 1, SDL_GAMEPAD_BUTTON_DPAD_DOWN, false);
+    pad = client_menu_pad(c);
+    CHECK(pad & Q2_PAD_DOWN);
+    client_menu_close(c);
+    CHECK(client_pause_open(c, 0));
+    CHECK(client_menu_player_one_owns(c));
+    client_menu_close(c);
+    release_fixture(c);
+}
+
+/* GameCheckPaused asks every player every frame, so two pads lost together
+ * are asked for one after the other; and a single player's pad in slot 1 is
+ * owed back when no other pad is left. */
+static void test_reinsert_rescan(void)
+{
+    client *c = fixture(3);
+
+    q2_menu_settings_defaults(&c->settings);
+    q2_menu_init(&c->menu, &c->settings, 248);
+    q2_menu_set_multiplayer(&c->menu, true);
+    c->gamepads.id[1] = 101;
+    c->gamepads.id[2] = 102;
+    CHECK(client_pad_owed(c, 1) && client_pad_owed(c, 2));
+    CHECK(!client_pad_owed(c, 3));
+    c->gamepads.id[1] = 0;
+    c->gamepads.id[2] = 0;
+    c->pad_lost = (1u << 1) | (1u << 2);
+
+    client_reinsert_check(c);
+    CHECK(q2_menu_reinsert_open(&c->menu) && c->menu.violating_player == 1);
+    client_reinsert_poll(c);
+    CHECK(q2_menu_reinsert_open(&c->menu));     /* still waiting on pad 2 */
+    c->gamepads.id[1] = 201;
+    client_reinsert_poll(c);
+    CHECK(!q2_menu_reinsert_open(&c->menu) && c->pad_lost == (1u << 2));
+    client_reinsert_check(c);
+    CHECK(q2_menu_reinsert_open(&c->menu) && c->menu.violating_player == 2);
+    c->gamepads.id[2] = 202;
+    client_reinsert_poll(c);
+    client_reinsert_check(c);
+    CHECK(!q2_menu_reinsert_open(&c->menu) && c->pad_lost == 0);
+    client_menu_close(c);
+
+    /* Single player, default assignment: the one pad lives in slot 1. */
+    c->mp_enabled = false;
+    c->gamepads.id[1] = 0;
+    c->gamepads.id[2] = 102;
+    CHECK(!client_pad_owed(c, 1));              /* pad 2 takes over */
+    c->gamepads.id[2] = 0;
+    CHECK(client_pad_owed(c, 2));
+    c->gamepads.id[1] = 0;
+    CHECK(client_pad_owed(c, 1));
+    c->pad_lost = 1u << 1;
+    client_reinsert_check(c);
+    CHECK(q2_menu_reinsert_open(&c->menu) && c->menu.violating_player == 0);
+    c->gamepads.id[1] = 301;
+    client_reinsert_poll(c);
+    CHECK(!q2_menu_reinsert_open(&c->menu) && c->pad_lost == 0);
+    client_menu_close(c);
+    release_fixture(c);
+}
+
+/* Player one's style chosen for the pad survives a turn on the keyboard. */
+static void test_player_one_style_kept(void)
+{
+    client *c = fixture(1);
+    c->mp_enabled = false; c->sim[0].multiplayer = false;
+    c->headless = false;
+    c->gamepads.first_slot = 1;
+    c->gamepads.id[1] = 101;
+    client_apply_input(c);
+    CHECK(c->settings.v[Q2_SET_PAD_CLASS] == 1);
+    c->settings.v[Q2_SET_PAD_STYLE] = Q2_PAD_STYLE_BOTH_STICKS;
+    client_apply_input(c);
+    /* The PLAYERS page gives player one the keyboard (slot 0 is empty). */
+    c->menu.page_id = Q2_PAGE_FRONT_PLAYERS;
+    client_apply_input(c);
+    CHECK(c->settings.v[Q2_SET_PAD_CLASS] == 2);
+    CHECK(c->settings.v[Q2_SET_PAD_STYLE] == Q2_PAD_STYLE_STANDARD_A);
+    c->menu.page_id = Q2_PAGE_NONE;
+    client_apply_input(c);
+    CHECK(c->settings.v[Q2_SET_PAD_CLASS] == 1);
+    CHECK(c->settings.v[Q2_SET_PAD_STYLE] == Q2_PAD_STYLE_BOTH_STICKS);
+    /* And the pad leaving and coming back. */
+    c->gamepads.id[1] = 0;
+    client_apply_input(c);
+    c->gamepads.id[1] = 102;
+    client_apply_input(c);
+    CHECK(c->settings.v[Q2_SET_PAD_STYLE] == Q2_PAD_STYLE_BOTH_STICKS);
+    release_fixture(c);
+}
+
+/* A wheel notch is taken only on a frame that ticks, one per tick with a quiet
+ * tick between, so three quick notches are three weapon changes. */
+static void test_wheel_notches_per_tick(void)
+{
+    client *c = fixture(1);
+    c->mp_enabled = false; c->sim[0].multiplayer = false;
+    c->wheel_queue = 3;
+    client_input_simulated(c, 1.0f / 1000.0f);  /* no tick */
+    CHECK(c->wheel_queue == 3);
+    /* 1/20 s is 15 units, past the 12-unit PAL frame: every call ticks. */
+    client_input_simulated(c, 1.0f / 20.0f);
+    CHECK(c->wheel_queue == 2);
+    client_input_simulated(c, 1.0f / 20.0f);    /* the gap */
+    CHECK(c->wheel_queue == 2);
+    client_input_simulated(c, 1.0f / 20.0f);
+    CHECK(c->wheel_queue == 1);
+    release_fixture(c);
+}
+
+/* A respawn is a fresh entity at full light, and a grenade primed in a hand
+ * that died goes off on its own fuse instead of in the next life. */
+static void test_respawn_light_and_dead_hand_grenade(void)
+{
+    client *c = fixture(2);
+    q2_projectile *p;
+
+    c->sim[0].player[1].light = 0;
+    c->sim[0].pcombat[1].inv.health = 0;
+    CHECK(client_mp_respawn(c, 1));
+    CHECK(c->sim[0].player[1].light == Q2_LIGHT_ONE);
+
+    q2_projectiles_init(&c->sim[0].combat.projectiles);
+    p = &c->sim[0].combat.projectiles.p[0];
+    p->in_use = true;
+    p->kind = Q2_PROJ_HAND_GRENADE;
+    p->node = Q2_PROJ_NODE_HELD;
+    p->owner = 1;
+    p->pos[0] = c->sim[0].player[1].pos[0];
+    p->pos[1] = q2_sim_origin_y(c->sim[0].player[1].pos[1]);
+    p->pos[2] = c->sim[0].player[1].pos[2];
+    p->damage = 120;
+    p->splash_radius = Q2_SPLASH_RADIUS_GRENADE;
+    p->expires = c->sim[0].level_time + 1;
+    c->sim[0].player[1].ent2_flags |= Q2_ENT2_DEAD;
+    CHECK(q2_projectile_hand_held_index(&c->sim[0].combat.projectiles, 1) >= 0);
+    client_input_simulated(c, 1.0f / 30.0f);
+    client_input_simulated(c, 1.0f / 30.0f);
+    CHECK(q2_projectile_hand_held_index(&c->sim[0].combat.projectiles, 1) < 0);
+    release_fixture(c);
+}
+
 int main(int argc, char **argv)
 {
     test_inputs();
@@ -884,6 +1061,11 @@ int main(int argc, char **argv)
     test_rounds_and_cameras();
     test_teleports_lighting_and_bodies();
     test_virtual_controllers();
+    test_pause_ownership();
+    test_reinsert_rescan();
+    test_player_one_style_kept();
+    test_wheel_notches_per_tick();
+    test_respawn_light_and_dead_hand_grenade();
     if (argc > 1) test_results_disc(argv[1], argc > 2 ? argv[2] : NULL);
     printf("%d split client checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
