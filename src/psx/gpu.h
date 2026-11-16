@@ -228,7 +228,9 @@ typedef struct psx_ot_batch {
     u8  quick;          /* area +12 list; otherwise the Standard +8 list   */
     u8  pad[3];
     s32 spatial[6];     /* point[3], or min[3] followed by max[3]           */
-    s32 camera[3];      /* retail reads the current camera at 0x800B2B24   */
+    s32 camera[3];      /* retail reads CurrCamPos: PAL 0x800B28B4, which
+                         * is SLUS 0x800B2B24 (PAL 0x800B2B24 is the
+                         * chaingun's sound handle)                        */
 } psx_ot_batch;
 
 /*

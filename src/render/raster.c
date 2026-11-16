@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+bool psx_raster_general_only = false;
+
 void psx_raster_opts_default(psx_raster_opts *opts)
 {
     if (!opts)
@@ -316,6 +318,51 @@ static int signed11(int value)
 /*   - No dithering. The GPU does not dither rectangle fills, which is why a   */
 /*     flat HUD panel is flat and a Gouraud wall is not.                       */
 /* ------------------------------------------------------------------------- */
+/* One row of an untextured rectangle, write_pixel's terms for a fixed colour:
+ * semi-transparent tiles (the damage and underwater tints among them) cover
+ * the whole view, so the blend gets an instance per mode. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#define RASTER_TILE_INLINE static __forceinline
+#else
+#define RASTER_TILE_INLINE static inline __attribute__((always_inline))
+#endif
+RASTER_TILE_INLINE void raster_tile_blend(u16 *row, u16 *vrow, int left, int right,
+                                          int r, int g, int b, u16 mask, bool check,
+                                          const psx_blend mode)
+{
+    int px;
+    for (px = left; px < right; px++) {
+        u16 out;
+        if (check && (row[px] & 0x8000u)) continue;
+        out = (u16)(blend_pixel(row[px], r, g, b, mode) | mask);
+        row[px] = out;
+        if (vrow) vrow[px] = out;
+    }
+}
+
+static void raster_tile_row(u16 *row, u16 *vrow, int left, int right,
+                            int r, int g, int b, bool semi, psx_blend mode, u8 mask_mode)
+{
+    u16 mask = (mask_mode & 1) ? 0x8000u : 0;
+    bool check = (mask_mode & 2) != 0;
+    int px;
+    if (!semi) {
+        u16 out = (u16)(psx_rgb555((u8)r, (u8)g, (u8)b) | mask);
+        for (px = left; px < right; px++) {
+            if (check && (row[px] & 0x8000u)) continue;
+            row[px] = out;
+            if (vrow) vrow[px] = out;
+        }
+        return;
+    }
+    switch (mode) {
+    case PSX_BLEND_HALF:    raster_tile_blend(row, vrow, left, right, r, g, b, mask, check, PSX_BLEND_HALF); break;
+    case PSX_BLEND_ADD:     raster_tile_blend(row, vrow, left, right, r, g, b, mask, check, PSX_BLEND_ADD); break;
+    case PSX_BLEND_SUB:     raster_tile_blend(row, vrow, left, right, r, g, b, mask, check, PSX_BLEND_SUB); break;
+    default:                raster_tile_blend(row, vrow, left, right, r, g, b, mask, check, PSX_BLEND_QUARTER); break;
+    }
+}
+
 static void raster_rect(psx_framebuffer *fb,
                         const psx_prim *prim,
                         const psx_vram *vram,
@@ -340,48 +387,83 @@ static void raster_rect(psx_framebuffer *fb,
 
     raster_clip(fb, opts, &cx0, &cy0, &cx1, &cy1);
 
-    for (py = y0; py < y1; py++) {
-        if (py < cy0 || py >= cy1)
-            continue;
-        for (px = x0; px < x1; px++) {
-            int r = prim->rgb[0].r;
-            int g = prim->rgb[0].g;
-            int b = prim->rgb[0].b;
-            bool stp = false;
-
-            if (px < cx0 || px >= cx1)
+    /* write_pixel's terms, by row rather than by pixel: it divides the pixel
+     * index by the width twice for the VRAM mirror and once more for the field
+     * test, which made a full-screen tile cost more than the geometry under
+     * it. The pixels, their order and every texel fetch are unchanged; a
+     * field-skipped row still samples, since the texture cache fills either
+     * way. */
+    {
+        psx_blend mode = (psx_blend)((prim->tpage >> 5) & 3);
+        bool semi_prim = opts->semi_transparency && prim->semi_transparent;
+        bool ui = opts->ui || prim->ui;
+        int left = x0 > cx0 ? x0 : cx0, right = x1 < cx1 ? x1 : cx1;
+        for (py = y0 > cy0 ? y0 : cy0; py < y1 && py < cy1; py++) {
+            u16 *row = fb->px + py * fb->width;
+            u16 *vrow = fb->vram ? &fb->vram->px[fb->vram_y + py][fb->vram_x] : NULL;
+            u16 *scene_row = opts->scene ? opts->scene + py * fb->width : NULL;
+            u8 *ui_row = opts->scene ? opts->ui_mask + py * fb->width : NULL;
+            bool row_skip = opts->skip_field && (((py + fb->vram_y) & 1) == opts->field);
+            if (!textured && !scene_row && !psx_raster_general_only) {
+                /* A tile: one colour, no texel fetch, so nothing but these
+                 * stores can happen in this row. */
+                if (!row_skip)
+                    raster_tile_row(row, vrow, left, right, prim->rgb[0].r, prim->rgb[0].g,
+                                    prim->rgb[0].b, semi_prim, mode, opts->mask_mode);
                 continue;
+            }
+            for (px = left; px < right; px++) {
+                int r = prim->rgb[0].r;
+                int g = prim->rgb[0].g;
+                int b = prim->rgb[0].b;
+                bool stp = false, semi;
+                u16 colour, mask;
 
-            if (textured) {
-                int tr, tg, tb;
-                int du = (prim->sprite_w
-                            ? (px - x0) * prim->sprite_w / (x1 - x0)
-                            : (px - x0));
-                int dv = (prim->sprite_h
-                            ? (py - y0) * prim->sprite_h / (y1 - y0)
-                            : (py - y0));
-                u8 u = (u8)(prim->uv[0].u + ((prim->tpage & 0x1000u) ? -du : du));
-                u8 v = (u8)(prim->uv[0].v + ((prim->tpage & 0x2000u) ? -dv : dv));
+                if (textured) {
+                    int tr, tg, tb;
+                    int du = (prim->sprite_w
+                                ? (px - x0) * prim->sprite_w / (x1 - x0)
+                                : (px - x0));
+                    int dv = (prim->sprite_h
+                                ? (py - y0) * prim->sprite_h / (y1 - y0)
+                                : (py - y0));
+                    u8 u = (u8)(prim->uv[0].u + ((prim->tpage & 0x1000u) ? -du : du));
+                    u8 v = (u8)(prim->uv[0].v + ((prim->tpage & 0x2000u) ? -dv : dv));
 
-                if (!sample_texture(vram, opts->cache, prim->tpage, prim->clut, opts->texture_window, u, v,
-                                    &tr, &tg, &tb, &stp))
-                    continue;      /* index 0 is transparent, not black */
+                    if (!sample_texture(vram, opts->cache, prim->tpage, prim->clut, opts->texture_window, u, v,
+                                        &tr, &tg, &tb, &stp))
+                        continue;      /* index 0 is transparent, not black */
 
-                if (prim->textured_blend) {
-                    r = (tr * r) >> 7;
-                    g = (tg * g) >> 7;
-                    b = (tb * b) >> 7;
-                } else {
-                    r = tr; g = tg; b = tb;
+                    if (prim->textured_blend) {
+                        r = (tr * r) >> 7;
+                        g = (tg * g) >> 7;
+                        b = (tb * b) >> 7;
+                    } else {
+                        r = tr; g = tg; b = tb;
+                    }
+                }
+
+                if (r < 0) r = 0; else if (r > 255) r = 255;
+                if (g < 0) g = 0; else if (g > 255) g = 255;
+                if (b < 0) b = 0; else if (b > 255) b = 255;
+
+                /* write_pixel */
+                if (row_skip) continue;
+                semi = semi_prim && (!textured || stp);
+                colour = psx_rgb555((u8)r, (u8)g, (u8)b);
+                mask = ((opts->mask_mode & 1) || stp) ? 0x8000u : 0;
+                if ((opts->mask_mode & 2) && (row[px] & 0x8000u)) continue;
+                row[px] = (u16)((semi ? blend_pixel(row[px], r, g, b, mode) : colour) | mask);
+                if (vrow) vrow[px] = row[px];
+                if (scene_row) {
+                    if (ui) {
+                        ui_row[px] = 255;
+                    } else {
+                        scene_row[px] = (u16)((semi ? blend_pixel(scene_row[px], r, g, b, mode) : colour) | mask);
+                        if (!semi) ui_row[px] = 0;
+                    }
                 }
             }
-
-            if (r < 0) r = 0; else if (r > 255) r = 255;
-            if (g < 0) g = 0; else if (g > 255) g = 255;
-            if (b < 0) b = 0; else if (b > 255) b = 255;
-
-            write_pixel(fb, opts, prim, py * fb->width + px, r, g, b,
-                        opts->semi_transparency && prim->semi_transparent && (!textured || stp), stp);
         }
     }
 }

@@ -115,6 +115,13 @@ typedef struct psx_raster_opts {
 
 void psx_raster_opts_default(psx_raster_opts *opts);
 
+/* Diagnostic: draw everything through the general span and rectangle loops,
+ * bypassing the specialised ones (the 4-bit polygon span, its SSE2 form, the
+ * tile rows). Their output is byte-identical by construction, and
+ * test_raster_fastpath holds them to it by drawing the same packets both
+ * ways. Never set in the client. */
+extern bool psx_raster_general_only;
+
 /* GP0 E1/E2/E6 registers, shared by successive packets, viewports and frames.
  * Textured polygons update bits 0..8/11; E1 updates all fourteen mode bits.
  * Bit 11 changes only when GP1(09).0 enables the additional VRAM bank.

@@ -4,6 +4,7 @@
 #include "sha256.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /*
@@ -53,6 +54,36 @@ static u32 derive_gp(const q2_exe *e)
         }
     }
     return 0;
+}
+
+/*
+ * The executable's digest, remembered for the last image hashed. Ten table
+ * loaders each load the executable while a level loads, and hashing its
+ * 620 KB every time was a fifth of the load. The digest is reused only for
+ * byte-identical contents (same size, memcmp), so it is the digest
+ * sha256_buffer would return; anything else is hashed and remembered.
+ */
+static u8    *g_exe_hashed;
+static size_t g_exe_hashed_size;
+static u8     g_exe_hashed_digest[SHA256_DIGEST_SIZE];
+
+static void exe_digest(const u8 *data, size_t size, u8 digest[SHA256_DIGEST_SIZE])
+{
+    u8 *copy;
+    if (g_exe_hashed && g_exe_hashed_size == size && !memcmp(g_exe_hashed, data, size)) {
+        memcpy(digest, g_exe_hashed_digest, SHA256_DIGEST_SIZE);
+        return;
+    }
+    sha256_buffer(data, size, digest);
+    copy = (u8 *)malloc(size ? size : 1);
+    free(g_exe_hashed);
+    g_exe_hashed = copy;
+    g_exe_hashed_size = 0;
+    if (copy) {
+        memcpy(copy, data, size);
+        g_exe_hashed_size = size;
+        memcpy(g_exe_hashed_digest, digest, SHA256_DIGEST_SIZE);
+    }
 }
 
 q2_result q2_exe_load(q2_exe *out, const disc *d, const char *exe_name)
@@ -121,7 +152,7 @@ q2_result q2_exe_load(q2_exe *out, const disc *d, const char *exe_name)
         u8   digest[SHA256_DIGEST_SIZE];
         char hex[SHA256_HEX_SIZE];
 
-        sha256_buffer(out->file.data, out->file.size, digest);
+        exe_digest(out->file.data, out->file.size, digest);
         sha256_hex(digest, hex);
         out->build       = q2_build_by_hash(hex);
         out->build_exact = out->build != NULL;

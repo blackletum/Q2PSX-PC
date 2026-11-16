@@ -2694,7 +2694,7 @@ static void test_disc_security_orb(const char *disc_path, const char *output)
     {
         const dat_chunk *names = c->zone.zone.chunk[Q2_ZONE_MAP_NAMES];
         u8 old_name[12], old_hidden;
-        u8 *entry = (u8 *)names->data + 4*16;
+        u8 *entry = (u8 *)(uintptr_t)names->data + 4*16;
         memcpy(old_name, entry, sizeof(old_name));
         memset(entry, 0, sizeof(old_name)); memcpy(entry, "LiftRing1", 9);
         ring = client_named_node(c, "LiftRing1");

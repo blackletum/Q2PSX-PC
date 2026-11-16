@@ -574,6 +574,26 @@ checks the optional player tail and legacy/truncated records.
 python -B tests/fixtures/generate_autoaim_reference.py .install/disc/game.cue '<US-disc.cue>' --trace .agents/tmp/functional-parity/autoaim/native.json
 ```
 
+## Native player muzzle
+
+`generate_muzzle_reference.py` verifies the PAL/US executable hashes, builds
+the player's matrix at object+0x2C0 with the retail RotMatrix (`0x80089E38`)
+and runs QPlayerFireBlaster (`0x8004BFBC`) from its entry until the muzzle
+point is complete at `0x8004C078`. The offset load, the Y negation
+(`0x8004C01C`), RotateS (`0x8006FC1C`), the subtracted rotated Y
+(`0x8004C04C`) and the eye height all execute unchanged; nothing is hooked.
+The blaster's offset at `0x800AE9C4` is rewritten in place, so the same
+instructions carry every weapon's offset, Grenade3's release literal and
+random ones. There are 1,536 cases per revision, covering level, pitched,
+rolled and arbitrary views, and the two revisions agree.
+
+`test_weapon` checks `q2_weapon_muzzle_origin` against every point, and
+`q2_rotation_euler` against every matrix.
+
+```powershell
+python -B tests/fixtures/generate_muzzle_reference.py .install/disc/game.cue '<US-disc.cue>' --trace .agents/tmp/functional-parity/muzzle/native.json
+```
+
 ## Native level VRAM
 
 `generate_vram_reference.py` runs each level-table map's retail load (the heap

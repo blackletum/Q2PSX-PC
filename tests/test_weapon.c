@@ -13,7 +13,9 @@
 #include "random.h"
 #include "shock.h"
 #include "worldscale.h"   /* Q2_DT_NOMINAL, Q2_GRAVITY, Q2_VEL_DIV */
+#include "trig.h"
 #include "fixtures/toss_reference.h"
+#include "fixtures/muzzle_reference.h"
 #include "fixtures/projectile_contact_reference.h"
 
 static int g_failures;
@@ -913,6 +915,54 @@ static void test_kick_and_shock(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/*
+ * The muzzle point against QPlayerFireBlaster (0x8004BFBC) executed from its
+ * entry to 0x8004C078, with the player's matrix built by the retail RotMatrix
+ * (0x80089E38): the Y negation, RotateS (0x8006FC1C) and the subtracted
+ * rotated Y all run natively. Every weapon's offset, the hand grenade's
+ * release offset and arbitrary ones; level, pitched, rolled and arbitrary
+ * views (generate_muzzle_reference.py).
+ */
+static void test_native_muzzle(void)
+{
+    static const s32 eye[3] = { 0, 0, 0 };
+    size_t i;
+    u32 point_bad = 0, matrix_bad = 0;
+
+    for (i = 0; i < Q2PSX_ARRAY_COUNT(native_muzzle); i++) {
+        const native_muzzle_case *c = &native_muzzle[i];
+        s16 off[3], m[3][3];
+        s32 out[3];
+        int k;
+
+        for (k = 0; k < 3; k++)
+            off[k] = (s16)c->offset[k];
+        q2_weapon_muzzle_origin(off, eye, c->angles[1], c->angles[0],
+                                c->angles[2], out);
+        if (out[0] != c->delta[0] || out[1] != c->delta[1] ||
+            out[2] != c->delta[2]) {
+            if (point_bad++ < 8)
+                printf("  muzzle %u: angles (%d,%d,%d) offset (%d,%d,%d): "
+                       "port (%d,%d,%d), native (%d,%d,%d)\n", (unsigned)i,
+                       c->angles[0], c->angles[1], c->angles[2],
+                       c->offset[0], c->offset[1], c->offset[2],
+                       out[0], out[1], out[2],
+                       c->delta[0], c->delta[1], c->delta[2]);
+        }
+        q2_rotation_euler(m, c->angles[0], c->angles[1], c->angles[2]);
+        for (k = 0; k < 9; k++)
+            if (m[k / 3][k % 3] != c->matrix[k]) {
+                matrix_bad++;
+                break;
+            }
+    }
+    check_eq_i(point_bad, 0,
+               "every muzzle point is the blaster's own, executed natively");
+    check_eq_i(matrix_bad, 0,
+               "q2_rotation_euler is RotMatrix element for element");
+}
+
+/* ------------------------------------------------------------------------- */
 static void test_native_toss(void)
 {
     size_t i;
@@ -1012,6 +1062,7 @@ int main(void)
     test_all_weapon_contracts();
     test_kick_and_shock();
     test_muzzle();
+    test_native_muzzle();
     test_projectiles();
     test_native_toss();
     test_native_projectile_owners();

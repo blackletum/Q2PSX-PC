@@ -88,6 +88,9 @@ if(TARGET q2psx)
     add_executable(test_launcher test_launcher.c ../src/client/launchcfg.c)
     target_link_libraries(test_launcher PRIVATE ${split_client_libraries})
     add_test(NAME launcher_render COMMAND test_launcher --headless)
+    add_executable(test_client_args test_client_args.c ${client_extra_sources})
+    target_link_libraries(test_client_args PRIVATE ${split_client_libraries})
+    add_test(NAME args_client COMMAND test_client_args)
     add_executable(test_client_menu test_client_menu.c ${client_extra_sources})
     target_link_libraries(test_client_menu PRIVATE ${split_client_libraries})
     add_test(NAME menu_client COMMAND test_client_menu --headless)
@@ -431,6 +434,10 @@ add_executable(test_raster_edges test_raster_edges.c)
 target_link_libraries(test_raster_edges PRIVATE q2psx_render)
 add_test(NAME raster_edges COMMAND test_raster_edges)
 
+add_executable(test_raster_fastpath test_raster_fastpath.c)
+target_link_libraries(test_raster_fastpath PRIVATE q2psx_render)
+add_test(NAME raster_fastpath COMMAND test_raster_fastpath)
+
 add_executable(test_subdiv_pool test_subdiv_pool.c)
 target_link_libraries(test_subdiv_pool PRIVATE q2psx_game)
 add_test(NAME subdivision_pool COMMAND test_subdiv_pool)
@@ -540,6 +547,7 @@ add_executable(test_shock test_shock.c)
 target_link_libraries(test_shock PRIVATE
     q2psx_common
     q2psx_game
+    q2psx_build
 )
 
 add_test(NAME dualshock COMMAND test_shock)

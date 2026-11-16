@@ -1276,6 +1276,14 @@ static void test_meter(void)
     CHECK(found == Q2_SCREEN_METER_BARS, "%d bars, want %d",
           found, Q2_SCREEN_METER_BARS);
 
+    /* The ninth bar's colour is the word at 0x800AECBC (0x800771CC), which
+     * the data image holds as 80 80 FF 00 — not bar six's magenta again. */
+    CHECK(q2_screen_meter_rgb[8][0] == 128 && q2_screen_meter_rgb[8][1] == 128 &&
+          q2_screen_meter_rgb[8][2] == 255,
+          "bar 8 is 0x800AECBC's (128,128,255), got (%d,%d,%d)",
+          q2_screen_meter_rgb[8][0], q2_screen_meter_rgb[8][1],
+          q2_screen_meter_rgb[8][2]);
+
     CHECK(s.meter.value[3] == 0, "the summed accumulators reset");
     CHECK(s.meter.value[0] == 20, "the sampled ones do not");
 

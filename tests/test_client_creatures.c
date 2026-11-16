@@ -608,7 +608,15 @@ static void test_disc_motion(const char *disc_path, const char *output)
     c->carry_player = c->carry_same_map = true;
     CHECK(client_load_zone(c, "BASE1", 1));
     m = &c->creatures.set.monsters[index];
-    check_motion(&pending, &m->motion);
+    /* A gate keeps none of the pending motion: the creature comes back as a
+     * fresh spawn from GeneralRespawnStuffStore's record (0x8007D318), at the
+     * motion's origin with the yaw rounded down to 64 units. Only a cold save,
+     * checked above, carries the motion state. */
+    CHECK(m->in_use && !m->dead && m->think == q2_monster_go_think);
+    CHECK(m->pos[0] == pending.ent.pos[0] && m->pos[2] == pending.ent.pos[2]);
+    CHECK(m->angles[2] == (pending.yaw & 0xFC0));
+    CHECK(m->motion.impulse[0] == 0 && m->motion.impulse[1] == 0 && m->motion.impulse[2] == 0);
+    CHECK(!(m->motion.flags & 0x4000u));
     q2_save_free(&saved);
     close_client(c);
 }
@@ -1255,20 +1263,21 @@ static void test_disc_jorg_rider(const char *disc_path, const char *output)
     jorg = &c->creatures.set.monsters[ji]; rider = &c->creatures.set.monsters[ri];
     CHECK(rider->owner == jorg && rider->think == q2_cre_rider_launch && !rider->render_scale &&
           jorg->cre_bind->jorg_explosion_phase == explosion_phase);
-    /* A zone rebuild must restore this pending launch without replaying
-     * either spawn hook or waking the hidden child as an ordinary monster. */
-    {
-        s32 deadline = rider->next_think;
-        c->carry_player = c->carry_same_map = true;
-        CHECK(client_load_zone(c, "BOSS2", 1));
-        jorg = &c->creatures.set.monsters[ji]; rider = &c->creatures.set.monsters[ri];
-        CHECK(rider->in_use && rider->owner == jorg && !rider->render_scale &&
-              rider->think == q2_cre_rider_launch && rider->next_think == deadline &&
-              jorg->cre_bind->jorg_explosion_phase == explosion_phase);
-    }
+    /* A zone gate inside the two ticks before the launch. The rider is a live
+     * slot, so GeneralRespawnStuffStore (0x8007D318) keeps only its record and
+     * GeneralRespawnStuff (0x8007D158) brings it back through SpawnGeneral
+     * (0x800565C4) as a fresh class-14 spawn: visible and standing, its pending
+     * launch gone. Jorg, DEAD_DEAD, comes back a body (FinishDying 0x8007F630).
+     * The cold save above is what keeps the launch. */
+    c->carry_player = c->carry_same_map = true;
+    CHECK(client_load_zone(c, "BOSS2", 1));
+    jorg = &c->creatures.set.monsters[ji]; rider = &c->creatures.set.monsters[ri];
+    CHECK(rider->in_use && !rider->dead && rider->render_scale == 4096 &&
+          rider->health == 3000 && rider->think != q2_cre_rider_launch);
+    CHECK(jorg->in_use && jorg->corpse);
     q2_monster_set_tick(&c->creatures.set); q2_monster_set_tick(&c->creatures.set);
     CHECK(rider->render_scale == 4096 && rider->think == q2_M_MoveFrame &&
-          rider->currentmove && rider->currentmove->first_frame == 188 && rider->health == 3000);
+          rider->currentmove && rider->health == 3000);
     jorg->in_use = false; rider->angles[2] = 0;
     rider->enemy = rider->goalentity = &c->creatures.sight;
     rider->aiflags |= Q2_AI_STAND_GROUND;
@@ -1395,8 +1404,17 @@ static void test_disc_medic(const char *disc_path, const char *output)
     c->carry_player = c->carry_same_map = true;
     CHECK(client_load_zone(c, "JAIL3", 3));
     medic = &c->creatures.set.monsters[mi]; corpse = &c->creatures.set.monsters[ci];
+    /* The body keeps its pending revive; the Medic, a live slot, crossed the
+     * gate as GeneralRespawnStuffStore's record (0x8007D318) and is a fresh
+     * spawn with no enemy (test_client_zones pins the record itself). */
     CHECK(corpse->in_use && corpse->corpse && corpse->think == q2_cre_medic_revive &&
-          corpse->owner == medic && medic->enemy == corpse);
+          corpse->owner == medic);
+    CHECK(medic->in_use && !medic->dead && medic->enemy == NULL &&
+          medic->think == q2_monster_go_think && !(medic->aiflags & Q2_AI_MEDIC));
+    /* Put it back on the body it was reviving, so the check below still
+     * covers ai_checkattack leaving medic mode once the body stands up. */
+    medic->enemy = corpse; medic->oldenemy = &c->creatures.sight;
+    medic->aiflags |= Q2_AI_MEDIC;
     destroyed = q2_gib_counters.destroyed;
     {
         s32 time = q2_level_state.time;

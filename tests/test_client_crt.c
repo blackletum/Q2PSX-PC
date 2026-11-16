@@ -258,8 +258,27 @@ static void gpu_presentation(void)
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
 }
 
+/* `--shot`'s numbered names: the frame goes before the FILE's extension, and
+ * a dot in a directory is not one. */
+static void shot_numbering(void)
+{
+    char out[256];
+
+    shot_path_for("shots/frame.ppm", 7, true, out, sizeof(out));
+    CHECK(!strcmp(out, "shots/frame_0007.ppm"));
+    shot_path_for("frame", 12, true, out, sizeof(out));
+    CHECK(!strcmp(out, "frame_0012.ppm"));
+    shot_path_for("../shots/frame", 3, true, out, sizeof(out));
+    CHECK(!strcmp(out, "../shots/frame_0003.ppm"));
+    shot_path_for("C:\\caps.v2\\frame", 450, true, out, sizeof(out));
+    CHECK(!strcmp(out, "C:\\caps.v2\\frame_0450.ppm"));
+    shot_path_for("caps.v2/frame.ppm", 1, false, out, sizeof(out));
+    CHECK(!strcmp(out, "caps.v2/frame.ppm"));
+}
+
 int main(int argc, char **argv)
 {
+    shot_numbering();
     presentation();
     gpu_presentation();
     if (argc == 4 && !strcmp(argv[1], "--headless")) menu_capture(argv[2], argv[3]);

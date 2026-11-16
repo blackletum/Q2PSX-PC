@@ -19,7 +19,9 @@ No game data is included.
 4. At the title menu, choose **START → SINGLE PLAYER → NEW GAME**, then a
    difficulty. The opening film leads into the first level.
 
-The selector remembers your last disc. Each release includes **USER-GUIDE.html**:
+The selector remembers your last disc (in `%APPDATA%\Q2PSX-PC\launcher.cfg`, or
+`~/.config/q2psx-pc/launcher.cfg` on Linux and macOS). On Windows, dropping a CUE
+onto `q2psx.exe` starts that disc directly. Each release includes **USER-GUIDE.html**:
 open it in a browser for controls, saves, multiplayer, display options and
 troubleshooting. The guide works offline and has a print layout. GitHub displays
 its HTML source; download the file or open the copy in a release to read it.
@@ -35,6 +37,11 @@ On Linux or macOS:
 ```sh
 ./q2psx --disc "/path/to/Quake II/game.cue"
 ```
+
+`--disc` may be left off; a path on its own is taken as the disc. `--help` lists
+every option, with the developer and capture options in a section of their own.
+A mistyped option, a bad value or a disc that will not open stops the launch with
+a message saying what was wrong and what to do; on Windows the error box shows it.
 
 ## Disc compatibility
 

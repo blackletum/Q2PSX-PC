@@ -1128,8 +1128,19 @@ reselects from `refire` a tick late, and its `q2_vw_select` arms the 70-tick
 countdown where 0x800506C4 does not. The port therefore stops asking after a
 dry pass, as the console's next pass lowers instead.
 
+*Stale, corrected 16 November:* the same commit (`63260d1`) set the hook. The
+client installs `client_vw_auto_select` on every player's driver before each
+call (main.c). That function picks the weapon inside the dry pass and carries
+`vw_last_weapon` along, so no 70-tick countdown is armed. The refire value is
+now only drained. The `hand_live` sentence below is stale for the same reason:
+VWPN chunk version 2 writes and reads `hand_live` (save.c), and the 0.3.0 notes
+say a held grenade survives a save.
+
 The grenade's think is placed after the driver in the same frame, the client's
-order; the console's entity order was not traced. The thrown grenade's flight,
+order; the console's entity order was not traced. (Since traced by the JAIL2
+oracle run: the release is handed over a frame after the 411 crossing, and a
+thrown grenade moves at its object slot's turn; see "Frame 322 to 338" and
+"Frame 338 to 376" in the 4 November section.) The thrown grenade's flight,
 its fuse expiry (0x8004AA1C, mirrored by `q2_vw_hand_grenade_expired`) and the
 throw sample are outside the fixture. `hand_live` is not in the save chunk, so
 a held grenade restored from a save stops thinking. PrimaryBFG 0x8004B2B4
@@ -1162,6 +1173,8 @@ down. Only mods 3, 13, 15 and 18 read the point as a direction. Still open:
 for a client target the bullet arm adjusts the entry with GenMissileHitPlane
 (0x80048930..0x80048954) against the previous frame's view plane, a shift of
 at most a few dozen units per axis. That adjustment is not reproduced.
+(Reproduced 31 October; see "GenMissileHitPlane, and the overflow that is its
+behaviour".)
 
 **Drowning.** 0x8003D358 `slti v0, a2, 3601` / `bne v0, zero, 0x8003D3E0`
 takes the 750-tick ambience arm while air is below 3601. It drowns at
@@ -1192,6 +1205,9 @@ reading and shipped-data censuses; no fixture executes them.
 - Muzzle roll: RotMatrix is Ry·Rx·Rz with roll innermost, so the native fire
   matrix and the port's camera transpose compose identically. A one-unit
   rounding difference remains: RotateS floors in the Y-negated frame.
+  *Closed 4 and 16 November:* the Y negation (`1e63c2e`), then the matrix
+  itself, which is now RotMatrix's (Data-global census and parity items,
+  16 November).
 
 The unit-five board camera is reachable through BOSS2 record 0xC0. It reads
 the level table's static first entry, and the port keeps the player camera as
@@ -1212,6 +1228,9 @@ host policy.
   kept separate, deliberately, is the FILTER, because the shot path rejects on
   `takedamage` and 0x800545E8 skips only the ignore entity. The second clause
   stands: list ORDER against native list membership is still unqualified.
+  (Qualified 4 November by measurement: membership now follows gitrace, and
+  reversing the order changes none of 29,568 sweep values; see "The AI body
+  clip" in that section.)
 
 All 73 CTests pass. The disc-backed muzzle, weapon (grenade, projectile
 contact, bolt, auto-aim), save, player-animation and split-screen suites pass
@@ -1250,7 +1269,8 @@ The sim raises the requests where the console calls PlayerNoise:
   (0x80048998..0x800489AC).
 - Type 2 at a player's bolt hitting the world. This comes from both arms of
   ProcessMissiles_Many's hull impact (0x8004861C, 0x80048650); a bolt
-  striking a body makes none.
+  striking a body makes none. (Wrong; corrected 4 November: DoNoise runs on
+  every arm through 0x80048608.)
 
 The client hands these requests to the creature world once per frame.
 
@@ -1358,6 +1378,8 @@ reached the player from behind their own view plane. The projectile arm's call
 (0x80047E94..0x80047EB8) and its `LineIntersectCrePlane` fallback are read and
 NOT applied: the projected point feeds `ProcessMissiles_Many`'s later reads at
 0x80047EDC, so applying it wants that function's ordering established first.
+(Applied 4 November with its LineIntersectCrePlane arm; see "The projectile
+arm's contact point".)
 
 **And one of this file's own claims was stale.** "The AI body clip (aiworld.c)
 still uses the older cylinder arithmetic" was true when it was first written and
@@ -1546,8 +1568,10 @@ the same sweep and need no work:
 
 ## Known differences from the console, 4 November
 
-The first three of this round's items are closed; the rest are open and
-listed at the end. Every claim below was checked by executing the disc's own code
+The first three of this round's items were closed on 4 November. The items
+then left open (the single random stream, the driver write order, palette 91,
+bits #25, vertex rule #2b, the muzzle rounding and the multiplayer missile
+order) were closed on 5 November and are listed below. Every claim below was checked by executing the disc's own code
 (the bolt fixture's R3000 machine) or by a whole-disc sweep.
 
 **The projectile arm's contact point.** ProcessMissiles_Many takes the actor
@@ -1631,6 +1655,16 @@ sequence cannot be observed outside self-play. The attract demo's levels now
 take the self-play arm as well (`selfplay_active`, see below).
 What can be matched is the structure: one state, every draw on the game
 frame, and a reseed at each load.
+
+*Corrected 5 November (`4ecf9b2`), noted here 16 November:* the expression
+above is wrong. 0x80070DF0 loads the multiplayer word 0x800AEBCC, and
+`beq v1, zero, 0x80070E30` takes `a0 = 13` whenever it is clear. The root
+counter (`jal 0x80086EA4`, 0x80070E20) is read only for a multiplayer level
+outside self-play (0x800B2A24 clear). So every single-player load, the campaign
+included, seeds 13, and the console's absolute single-player sequence can be
+observed. The client seeds 13 unless an interactive multiplayer game is
+running (main.c, at `q2_random_seed`). It seeds only on a level load, never on
+a zone stream inside the level (ReloadLevelData, 0x800793B8).
 
 The draws that ran per DISPLAY frame now run on the logic tick, which is the
 console's frame (QuakeLoop runs once per game frame):
@@ -1719,7 +1753,9 @@ resets; the port puts the player's back when the demo returns to the title.
 Limits: the port's creatures do not reproduce the console's encounters, so
 on both discs the BASE3 and WASTE2 demos end early when player one dies there,
 and the console's player presumably does not. JAIL2 plays its whole PAL
-recording. The magazine-demo arm and the record path (SelfRecordOn) are not
+recording. (Superseded by the parity probe below: all six demos now match the
+console to their ends. On the console too, BASE3's player one dies, at record
+frame 526.) The magazine-demo arm and the record path (SelfRecordOn) are not
 reached on a retail disc and are not modelled.
 
 **Closed after that (5 November): every level's VRAM is the console's.** The
@@ -2328,6 +2364,132 @@ counts for both discs. The light rides in the PLYR chunk's version-2 tail, so a
 save taken mid-fade resumes the fade; a version-1 tail restores 4096. Not
 covered: the cross-zone arm was run only by the unit test.
 
+## Data-global census and parity items, 16 November
+
+**The named data globals.** MAIN.SYM's data list (`syms <US cue> data`, in
+SLES-01534's address space) holds 1,319 named globals once the linker section
+markers and the 46 labels of the `_CODE` assembly block (0x800AED30..
+0x800B26D0) are dropped: 435 data, 86 sdata, 573 sbss and 225 bss. The tree
+cites 517 of them by name or by an address inside their extent. Of the 802
+it does not, 154 are Psy-Q plumbing (SPU, CD, pad, memory card); 147 are
+reached only as pointer words inside tables the port already reads from the
+disc (the animation blocks behind `WeaponSequences`, the 80 palettes behind
+`pallist0`, the particle ramps behind `ParticleColoursTable`, the laser, BFG
+and parasite beam records); 130 have no reference anywhere in the image; and
+371 are referenced directly, mostly renderer, allocator and sound-handle
+state. Ninety-two were checked value by value against the executable.
+
+Two values were wrong. `ShockPoint_ShotgunLittle`'s third word (0x8009D278)
+is 0x00800000, a 128-tick rest that the port had as 8, so the shotgun's pump
+pulsed 120 ticks early; `test_shock --disc` now compares all sixteen
+ShockDataAvailable records (0x8009D4E0) and both envelopes of each against
+the executable. The performance meter's ninth bar is 0x800AECBC (80 80 FF,
+read at 0x800771CC), not bar six's magenta; that meter is debug-only, since
+nothing writes `TimebarOn` (0x800B2A64). Two citations were wrong: the
+ordering-table camera is PAL `CurrCamPos` 0x800B28B4 (0x800B2B24 is its US
+address and, in PAL space, `SoundChaingunFire`), and PlayerNoise's
+multiplayer test at 0x80062BF4 reads id's `deathmatch->value` (0x800AECFC
+→ 0x800A3E94 + 20), not `LevelIsMultiPlayer` (0x800AEBCC). That cvar
+record's value word has no writer, so T_Damage (0x80062854/70) and
+PlayerNoise always see 0; the port's reading is equivalent because PSX
+multiplayer is deathmatch only, and the remaining "deathmatch word" comments
+on 0x800AEBCC (combat.h, entity.h, events_rt.h, sim.c, simcombat.c) name the
+right behaviour under the wrong global.
+
+Verdicts worth keeping: `QTimerIdentsPal`/`Ntsc` (0x800A3ECC/DC) give each
+new edict a think phase that G_Spawn_NoCre's memset of the whole 324-byte
+edict (0x8005F8B4) then clears, so every creature starts at phase 0 as the
+port assumes. `pbRearLookup`/`pbQPanLookup` are reached only through DoMix
+modes 3..6, and DefaultMix (0x800AEC28) is only ever 1 or 2. Display_Ammo's
+blaster digit rectangle (0x8009C598 + 66) lands inside `MaxAmmo` with a height
+of 0, which is why the blaster shows no counter. `CutOffDist` is 0x7FFFFFFF,
+so DrawScene's distance gate never fires. Tables matched against the disc:
+sin/cos, ratan, ArcCos, SQRT, TestCamera, the LensFlare styles,
+pbStereoLookup, GEnv's display limits, bottomPoly, Armour_Types, MaxAmmo,
+QPanel_PrevNext, the Armour_Fade/BCDNo/Gravity constants and the blur lists.
+Unsettled: `tppalx`/`tppaly` (0x800A32C4/EC) place each 4bpp UI image's CLUT
+for the loader at 0x8006901C, where the port takes UI palettes from
+`pallist0`; no 4bpp UI image has yet been shown to draw with its own CLUT.
+
+`q2psx-inspect xrefs` used to miss globals whose address is formed as
+`addiu rX, gp, N` (`addiu v0, gp, 520` at 0x800348A0) and every field read
+through that register; it now follows them, and over the 80 named sdata
+globals between 0x800AE000 and 0x800B2FFF it finds references for seven it
+used to report as unreferenced, and loses none.
+
+**DrawModels' +0xF4 gate is equivalent.** DrawModels (0x8006A6E4) walks the
+48 records of 768 bytes from 0x800CBA28 and skips one whose signed halfword
++0xF4 is <= 0 (`lh` 0x8006A74C, `blez` 0x8006A754). Every executable writer
+keeps a live object with a model above zero: the allocator writes 1
+(0x8006C1A0), the gun 1 (0x8004F750), the player 1 (0x8003B2AC); an explosion
+keeps its 1 and runs on +0x100; a body part is reset to dt+1 and shrinks on
++0xFC (0x80059E20..0x80059E68, 0x8005B358); an item's timer becomes 2
+(0x800597F8); a player corpse becomes 1 (0x8003E2E0); a fragment, a dissolving
+corpse, Grenade2 and the rocket are freed in the think that would take them
+to zero (0x80064368, 0x8005B428, 0x8004A054, 0x8004ADB0). The one exception,
+a held Grenade3 in state 1, is hidden by its 0x80 part flags
+(0x8004AB68..0x8004ABA0) until the state-2 setup clears them
+(0x8004A548..0x8004A584). The relocated modules' +0xF4 accesses are all
+`sw` to the edict's dodge slot.
+
+**The muzzle is RotMatrix's.** QPlayerFireBlaster and its siblings rotate the
+offset by the player's RotMatrix at object+0x2C0 (0x80089E38, built at
+0x8003AB60 from +0xE6/+0xE8/+0xEA) through RotateS (0x8006FC1C): each row
+times the Y-negated offset, `sra 12`, stored as a halfword
+(0x8006FD14..0x8006FD2C) and read back with `lh` (0x8004C02C); the caller
+adds X and Z and subtracts Y (0x8004C038, 0x8004C04C, 0x8004C06C). The port
+used the view basis's transpose, which composes the same rotation but forms
+Rx·Ry and then mixes the roll in with a second `>> 12`. Executing RotMatrix
+and QPlayerFireBlaster from its entry to 0x8004C078 with the offset at
+0x800AE9C4 rewritten in place (`generate_muzzle_reference.py`; every weapon's
+offset, Grenade3's {80, -50, 200} and random ones, 1,536 cases, PAL and US
+agreeing) put 186 port muzzles one unit off; `q2_weapon_muzzle_origin` now
+builds RotMatrix (`q2_rotation_euler`) and runs RotateS's rows, and all 1,536
+agree. The six attract-demo runs are byte-identical before and after.
+
+**The body clip's bump list is not native** (reopening the 4 November
+"measured" verdict). InitialiseBumpListFrame (0x8005525C) swaps two
+32-entry pointer buffers each frame (cap at 0x8005526C), so every query reads
+the PREVIOUS frame's appends. Appends come from NewTrueMove3d (0x80045990,
+when a2 is non-zero and +0x10C bit 0x80000 is clear), 0x80039588, 0x8003E25C
+and 0x8007F740. So a suspended creature (0x800578D8, out at 0x8007EC60), a
+corpse on its detach frame (0x8007F098) and the tick loop's own move
+(0x8007EE00, a2 = 0) append nothing, only the interpolation move (0x8007EFD0)
+does; a gibbed corpse appends and frees itself (0x8007F740, 0x8007F764),
+leaving a stale pointer on the next frame's list; and a player corpse appends
+twice (0x8003E25C, QCre_Move at 0x8003E2B4). Natively the order is slot order
+with the player in slot 0; the port's walk clip takes players first and then
+creature-set index, which departs from slot order after CREBATCH holds, slot
+reuse and Medic revives, and `hitscan_victims` puts the player last. The
+order is observable: executing 0x800544EC on two-body segments both ways, 1,562
+of 1,883 crossings land at a different point (by up to 17 units), 10 near-ties
+pick a different body, and when the start lies inside both cylinders the last
+in the list wins. Closing it wants a per-frame append model shared by the
+walk clip and the shot lists; it is not attempted here.
+
+**Also found, not corrected.** Grenade3's held arm tests its fuse only while
+the gun's position is 380 (0x8004A42C..0x8004A45C), where the port tests it
+every tick (`q2_sim_hand_grenade_update`), so in the roughly three frames
+between letting go and the 411 crossing the console throws an expired
+grenade, which goes off one toss later, and the port blows it up in the hand.
+On a held expiry the console also re-runs the state-2 setup (release point
+0x8004A58C..0x8004A668, toss 0x8004A8B8) before the fuse test, where the port
+detonates at the attached hand. The rail ring negates Y after RotateS's
+`>> 12` (0x800496C4); `q2_fx_rail_trail` folds the negation into the basis
+first, floor(-x) against the console's -floor(x), one unit before the ring's
+`>> 2` and `>> 10`.
+
+**The zone-return creature fixtures.** The disc-backed `test_client_creatures`
+still expected a same-zone rebuild to carry a living creature's pending motion,
+a Jorg rider's pending launch and a Medic's enemy, the behaviour `d82c55d`
+replaced with GeneralRespawnStuffStore's record; it failed 14 checks from that
+commit on. Those three scenarios now assert the fresh spawn (position from
+the motion's origin, yaw rounded down to 64, no impulse, no launch, no enemy)
+and keep the cold-save halves, which still carry the full runtime. The rider
+exists only from Jorg's death toss on (`jorg_toss_rider`, two ticks before
+its launch), so a gate cannot respawn a hidden child as a visible boss while
+Jorg lives.
+
 ## Limits
 
 The audit remains open. Passing suites did not demonstrate full functional
@@ -2342,7 +2504,13 @@ sound dispatch and its bank fallback are now covered. The BOSS1 entrance branch
 and BASE3/MAGDEMO's wall callback are covered as well. The shared ordinary
 laser damage path and effect ordering are now checked; other registered frame
 branches still need to be assessed
-against their effects and persistent state.
+against their effects and persistent state. The 5 November LevelBin census
+classified all 458 functions of the 25 distinct modules and closed the eight
+with reachable effects the port did not run (ENTITY-AUDIT); a census is not
+branch coverage, so this limit stands. Since 28 October the six attract demos
+also match the console's own QuakeLoop frame for frame (4 November section).
+That is integrated evidence for three single-player levels per disc, not an
+exhaustive playthrough.
 Signed damage now follows the measured native arithmetic, but no normal-play
 negative-damage caller has been established. Native damage and its feedback
 preserve the view-amplitude fields; the port no longer assigns guessed values.
@@ -2350,7 +2518,9 @@ The measured reader is retained without claiming that an exhaustive trace of
 every possible writer in every module has been performed.
 The creature and entity audits describe their native coverage.
 
-Remaining fidelity/measurement work includes paired retail camera/state captures,
+Remaining fidelity/measurement work includes paired retail camera/state captures
+(the lockstep oracle now supplies the console's own per-frame state, including
+the view's position and angles, for the six attract demos, but no picture),
 NTSC comparison captures, SPU key-on transitions, host output conversion and measured final audio amplitude,
 hardware movie A/V phase, and GPU cycle/scanout timing. See the
 [renderer](RENDERER-AUDIT.md) and [audio](AUDIO-AUDIT.md) audits. Physical controller
@@ -2390,12 +2560,21 @@ the camera level. Both PAL and US pass. Evidence is under
 
 These comparisons do not establish whole-session actor-list ordering, posed hit
 refinement, full weapon-driver scheduling or matched hardware picture output;
-those remain in the corresponding rows below. The original before-run log also
+those remain in the corresponding rows below. (Later: the actor-list order was
+measured on 4 November and the driver's write order matched on 5 November. The
+pitch that feeds this search, its fallback and the muzzle had the wrong sign;
+the error was found at JAIL2 record frame 198 and is corrected (4 November
+section). The fixture above takes the pitch as an input, so it could not see
+that.) The original before-run log also
 contains five subsequently corrected test assertions that used floor shift for
 negative bolt velocity; native bolt division truncates toward zero. The six
 barrel-state failures are the actual integration control.
 
-### Consolidated remaining work, 28 October
+### Consolidated remaining work, 16 November
+
+This supersedes the 28 October version of this table: each row now says what
+the 29 October to 16 November work closed, with the section or commit, and what
+genuinely remains.
 
 This is the known remaining scope, not proof that undiscovered defects are
 absent. A missing implementation, an unmeasured result and an archival format
@@ -2403,30 +2582,35 @@ question are different kinds of evidence; none is silently counted as complete.
 
 | Area | Current limit | Evidence needed to close it |
 | --- | --- | --- |
-| Player-body / weapon scheduling | Body transitions, RNG use and draw-independent advancement have native fixtures. The view-weapon driver runs once per logic tick, and ATTACK follows its last-substep return, dry 2 included (29 October section). The port's restructured driver loop can still order writes differently from native within a call that crosses key boundaries. | Execute full native weapon-driver sequences against the port's loop, and compare integrated live/death ordering and RNG histories. |
-| Projectile and other collision/toss details | Grenade bounce/owner lifetime, projectile actor queries, owner self-splash, cold-save cells and bolt flight/impact effects are corrected. Hitscan now uses the native query, with a single rail victim, immune shielding and entry-point blood. Knockback uses the entity origin, and gib rebounds use SDK arithmetic. GenMissileHitPlane now moves a client target's entry onto that player's own view plane before DoDamage, with the 32-bit wrap its numerator really has (31 October). The AI body clip's narrow phase has shared combat.c's transcription of 0x800544EC since `ff7795c`; the claim that it had not was stale. Still open: that clip's list ORDER against native list membership, the projectile arm's own GenMissileHitPlane call (0x80047EB8) and its LineIntersectCrePlane fallback, the cached bolt hull marcher, posed contact refinement, final-frame body submission, other entity/contact and simultaneous-sound ordering, and extreme math domains. | Compare the AI clip's list order with native. Read ProcessMissiles_Many's ordering around 0x80047E94 before applying its arm, since the projected point feeds that function's later reads. Qualify the remaining collision, presentation and sound boundaries and reachable numeric domains. |
-| Shared gameplay randomness | The port retains separate combat, effect and global gameplay streams. Bolt trail/impact draws now share their saved combat stream, but native BIOS randomness is shared across subsystems. | Reconstruct reachable caller order, unify stream ownership and qualify integrated gameplay plus cold-save histories without claiming isolated seeded fixtures establish whole-frame parity. |
-| Other explicit source deviations | Reviewed 29 October. The chime origin, knockback, BFG beam centring and drowning arms are corrected. Secret dedup, path-corner order, briefing-unit selection, actor effect areas and the muzzle's roll composition are equivalent or unreachable. The unit-five camera stays host policy. The BFG beam's endpoint freeze is corrected (31 October): ProcessSplurges' two pointers are a resolver the sim fills, so a live record's ends and area come off the ball and the body every pass. A model entity's geometric scale is carried and spent, so the gib dispatcher's fireball draws at half size. Remaining: a one-unit muzzle rounding difference, and a beam whose owner the resolver can no longer find keeps its last ends where native reads the recycled entity. | Pin the muzzle rounding against a native RotMatrix/RotateS fixture. The stale-owner case needs the allocator's reuse order to be reproduced before it can be anything but a stated deviation. |
-| Creature hearing (player noise) | Corrected (Player noise section): native noise entities, sources, saves and FindTarget's owner test. The expiry relies on the noise's zero health standing in for an undefined null-pointer read. Zone history deliberately drops a heard noise. The silencer and rebreather arms are unreachable in shipped data. | Matched retail traces of creatures responding to noise, if the undefined expiry read needs confirming. |
-| Native mission and campaign behavior | Named handlers are implemented, but static LevelBin fallback does not execute arbitrary branches or track registers. Registered frame callbacks, trigger combinations and their persistent state are not exhaustively qualified. | Compare reachable native branches and state transitions across difficulties, zone returns, deaths, restarts and saves; extend regressions for each discrepancy. |
-| Whole-game behavior | Creature callbacks, movement, weapons, menus and multiplayer have focused native/functional coverage; a scripted campaign route is not a complete retail playthrough. | Matched retail state/input traces for remaining interactions, including boss combat and movement edge cases. |
-| PAL rendering | No paired retail scenes with matching camera, animation, lighting and RNG are available for current gameplay output. | Compare matched native frames, including near-eye geometry, translucency, water and split-screen. |
-| NTSC and other revisions | Selected US loader states now match independent native execution, and both PAL/US pass all-zone allocation coverage. Matched NTSC picture/audio captures are still missing; these loader comparisons do not qualify every subsystem or revision. | Re-run behavior, picture, movie and audio acceptance against each supported build and qualify additional revisions separately. |
-| GPU timing | GPU duration, CPU/DMA contention and scanout racing the draw stream are unmodeled. | Establish shipped-game impact with packet/bus traces, then implement any required timing behavior. |
-| GPU/GTE arithmetic coverage | Existing external golden vectors cover a subset of coordinates, windings, gradients and opcode modes. | Broaden independent hardware acceptance data; do not derive expected values from the port. |
-| Flat-polygon allocation | The client uses native heap accounting for known layouts. All 82 selected PAL/US load phases match native mission dispatch and loader results, with separate coverage of all 102 direct-level selections. Multiplayer's erroneous Tribute allocation is removed; US four-player TIMS now receives the native 5,664 packets. All 115 zones pass on each disc. Unknown layouts or rejected accounting retain the provisional fallback. | Qualify arbitrary outer-state histories and recording allocations. Intermission retention and view counts are still supplied as fixture context; loader traces and all-zone coverage do not establish whole-session/hardware parity. See the renderer audit. |
-| Final audio amplitude | CD/main register values and gain units are fixed; the complete output chain lacks independent hardware measurements. | Measure final balance, clipping order and least-bit rounding with voices and CD mixed. |
-| XA and output conversion | The mixer now stays at 44,100 Hz with the CD's 25-tap interpolation; the XA predictor, filter rounding/start state and device conversion remain unqualified against hardware. | Compare the complete CD waveform and final device output against independent hardware measurements. |
-| SPU transitions and coverage | Absolute key-on latency/phase/history, remaining fractional filter positions and general ADSR settings are not fully established. Two finite END/repeat captures are excluded from the steady-waveform suite. | Match independent transition captures, including those exclusions. The game-specific ADSR setting is `0000/0000`. |
-| Reserved ADPCM shifts | The shift-12-through-15 hardware capture does not match the fallback; all 2,475 PAL samples use valid shifts. | Match an independently verified model, without treating this unused PAL edge case as a current audible defect. |
-| Movie synchronization | Software scheduling and fades work; initial hardware A/V phase, downstream device latency and long-run alignment are unmeasured. | Compare independent retail picture/audio captures and host output timing. |
-| Host audio devices | Missing/failed streams now retry, with nonfatal initialization and silent movie-clock continuity. Open default-device migration is delegated to SDL; physical switching and real speaker latency remain unqualified. | Exercise actual unplug/replug and default-device switching, and measure audible latency. Automated failures and real SDL dummy-output recovery are covered in the audio audit. |
-| Physical controllers | Automated tests cover synthetic events; physical ergonomics and rumble are not qualified. | A specifically authorized hands-on session with the intended controllers. |
-| Undefined native memory | Enemy-less Boss1 aim and the stand-on-entity branch can depend on uninitialized PS1 stack history. The port uses documented defined behavior. | Full machine-history evidence if reproducing these invalid/undefined states is required; another actor-state formula cannot establish equivalence. |
-| Historical reconstruction notes | `openquestions.md` retains stale open markers and low-impact metadata questions. Scene bytes/bits, resource fields, remap IDs and authored coordinate/bounds provenance are not all classified. | Reconcile each note with current code and native consumers. Count a functional defect only when a reachable behavioral effect is demonstrated. |
+| Player-body / weapon scheduling | Body transitions, RNG use and draw-independent advancement have native fixtures. The view-weapon driver runs once per logic tick, and ATTACK follows its last-substep return, dry 2 included (29 October section). **Closed since:** the driver's write order, matched against 7,838 native driver calls over all eleven weapons and the grenade cook ("Driver write order, 5 November"; `63260d1`). Also closed: the dry pass's in-call auto-select with no 70-tick countdown (`client_vw_auto_select`, main.c), and a held grenade surviving a save (VWPN chunk version 2 carries `hand_live`, save.c). Grenade3 now releases a frame after the 411 crossing with the thrower's roll and spends its fuse on the console's frame (`d022fba`, `ad9ac1e`). A grenade primed in a dying hand runs its own think and fuse (`f196a4d`). Single-player death draws no pick (`b55c902`). Integrated live and death ordering and the RNG history match the console on all six attract demos to their ends (4 November section). **Remaining:** PrimaryBFG's think (0x8004B2B4) writes the gun's move fields and has no port counterpart. The shotgun's +695 cock path in 0x80050454 is the client's `cock_pending` and is not executed against native. The driver fixture has synthetic banks, scripted fire answers and no hardware timing. The multiplayer death pick, which does draw `rand()`, is reached by no oracle run. | Execute the BFG think's move writes and the +695 path natively. Compare a multiplayer death against an oracle or fixture run. |
+| Projectile and other collision/toss details | Grenade bounce/owner lifetime, projectile actor queries, owner self-splash, cold-save cells and bolt flight/impact effects are corrected. Hitscan now uses the native query, with a single rail victim, immune shielding and entry-point blood. Knockback uses the entity origin, and gib rebounds use SDK arithmetic. GenMissileHitPlane now moves a client target's entry onto that player's own view plane before DoDamage, with the 32-bit wrap its numerator really has (31 October). The AI body clip's narrow phase has shared combat.c's transcription of 0x800544EC since `ff7795c`; the claim that it had not was stale. **Closed since (4 November section, `abb5f1c`):** the projectile arm's contact point. `bolt_contact_point` applies GenMissileHitPlane for a client with a view, nothing for a client without one (0x80047EAC), and LineIntersectCrePlane (0x800542A4) for a body with no client. The bolt fixture executes all of these on the disc's code, 276 cases per disc. DoNoise now runs on every bolt arm (0x80048608), and each arm reads the console's frame of view plane. The AI clip takes native list membership, and its ORDER was measured: reversing every 0x800544EC caller's candidate order changes none of 29,568 report values in the full PAL sweep. MoveModels' object-slot order is mirrored (`objslot.c`, `8586d7f`). Grenades, rockets and BFG balls move at their slot's turn (`7d4509e`), and bolts after the level effects (`db51c3a`). Projectiles take their birth cell from FindNewSpaceFromOld (15 November). **Remaining:** the cached bolt hull marcher, posed-model contact refinement, body submission on the final hull-impact frame, simultaneous-sound ordering, and SDK inputs outside the signed-positive table domain. Exact list-order ties, which the sweep never produced, are unexercised. **Reopened 16 November:** the list itself is not native. InitialiseBumpListFrame (0x8005525C) swaps two 32-entry pointer buffers each frame, so a query reads the previous frame's appends; appends come from NewTrueMove3d (0x80045990, a2 non-zero and +0x10C bit 0x80000 clear), 0x80039588, 0x8003E25C and 0x8007F740. A suspended creature, a corpse on its detach frame (0x8007F098) and the tick loop's move (0x8007EE00, a2 = 0) append nothing; a player corpse appends twice; a gibbed corpse appends and frees itself, leaving a stale pointer. The order is slot order with the player in slot 0, where the port's walk clip takes players then creature-set index and `hitscan_victims` the player last. Executing 0x800544EC on two-body segments in both orders lands 1,562 of 1,883 crossings at a different point (up to 17 units) and picks a different body in 10 near-ties (Data-global census and parity items, 16 November). | A per-frame append model of the bump list (slot order, one frame's lag, the 32 cap) shared by the walk clip and the shot paths; native sequence comparisons for those presentation and sound paths; qualify the reachable numeric domains. |
+| Shared gameplay randomness | **Closed:** the weapon, effect and entity streams and the multiplayer spawn tie-break are bound to one `rand()` state. It is seeded where InitLevel seeds it (0x80070E20..0x80070E34) and is not restored by a load. Draws made per display frame now run on the logic tick ("One random stream, 5 November"; `dcfc4d9`). All six attract demos, three per disc, match the console's `rand()` stream on every frame to their ends (4 November section; `09be4cf`, `42e2452`; RELEASING gate 1). FLKLIGHT's two extra draws per run outside JAIL2 zone 1 are gone (15 November). BIGGUN's glint stays private because its module seeds its own state (module+0x43B0). QuickRand's one caller is bound by no map (15 November). **Remaining:** the oracle covers three single-player levels per disc. Other levels, multiplayer, zone-gate and cold-save histories have no native stream comparison. Interactive multiplayer seeds from the host clock where the console reads its root counter, a signed-off deviation (RELEASING). Every single-player load seeds 13 on the console as in the port: the counter is read only when the multiplayer word 0x800AEBCC is set outside self-play (0x80070DF0..0x80070E30; `4ecf9b2`). | Oracle runs over further levels, gate crossings, cold saves and a multiplayer session. |
+| Other explicit source deviations | Reviewed 29 October. The chime origin, knockback, BFG beam centring and drowning arms are corrected. Secret dedup, path-corner order, briefing-unit selection, actor effect areas and the muzzle's roll composition are equivalent or unreachable. The unit-five camera stays host policy. The BFG beam's endpoint freeze is corrected (31 October): ProcessSplurges' two pointers are a resolver the sim fills, so a live record's ends and area come off the ball and the body every pass. A model entity's geometric scale is carried and spent, so the gib dispatcher's fireball draws at half size. **Closed since:** the one-unit muzzle rounding, in two steps. Every player fire function negates the offset's Y around RotateS (0x8004C01C, 0x8004C04C), so the height rounds up in the port's frame (4 November section, "Closed later in the round"; `1e63c2e`); and the matrix is RotMatrix's own (0x80089E38) rather than the view basis's transpose, whose entries round differently and still moved the muzzle a unit in 186 of 1,536 natively executed cases (16 November, `generate_muzzle_reference.py`). **Remaining:** a beam whose owner the resolver can no longer find keeps its last ends, where native reads the recycled entity. The 15 November reading of FindFreeEdictT (0x8007DE94) shows that read depends on the edict allocator's reuse order (G_Spawn's lowest free index above maxclients). The port does not model edict slots; the object-slot stack it does model (`objslot.c`) is not what this read uses. The case and the unit-five camera are signed off as deviations (RELEASING). | An edict-slot model that reproduces G_Spawn's reuse, if the deviation is ever to be removed. |
+| Creature hearing (player noise) | Corrected (Player noise section; `2db014d`): native noise entities, sources, saves and FindTarget's owner test. **Closed since:** a bolt raises DoNoise on every arm, including a body or door it strikes (4 November section). A noise is stamped with the clock the last thinking creature left (0x8007ED04), after the console's AI-clock order (oracle findings, 4 November section). Dropping a heard noise at a zone gate is now the console's own behaviour, not a port policy: GeneralRespawnStuffStore (0x8007D318) keeps no enemy for a living creature (15 November; `d82c55d`). The silencer and rebreather arms are unreachable in shipped data. **Remaining:** the 50-tick expiry reads the noise's health through a null object pointer (0x8005DE48). The port's zero health matches the expected kernel-RAM read, but no hardware trace confirms it. | A retail trace of that expiry, if the undefined read needs confirming. |
+| Native mission and campaign behavior | Named handlers are implemented. **Closed since:** RESTART and RESUPPLY now restore the level-start copy of save memory (2 November section; `33df893`). The 5 November LevelBin census read all 458 functions in the 25 distinct modules. Its eight reachable gaps are implemented: the module briefings on JAIL2, JAIL3, SECURITY, BOSS1 and BOSS2, BASE2's drawbridge box, the QENDMIS uplink and self-play (ENTITY-AUDIT, 5 November; openquestions LevelBin follow-up). The next unit now starts at its hub's fixed first level (5 November). The InitMission family and its kill-counter seeds are read (15 November). FLKLIGHT's per-zone gate and SIMROT2's step handler are fixed (15 November; `ee19660`). **Remaining:** the static LevelBin fallback still does not execute branches or track registers, and a census classifies functions; it does not cover their branches. Registered frame callbacks, trigger combinations and their persistent state are not exhaustively qualified. Not verified (15 November): whether any module imports the SoundSetVolume slot (+0x138), and a POWER consumer of unit 3's second kill-counter seed. RESTART after a file load returning to the loaded game is a stated deviation (2 November). | Compare reachable native branches and state transitions across difficulties, zone returns, deaths, restarts and saves; extend regressions for each discrepancy. Scan the modules for the +0x138 import. |
+| Whole-game behavior | Creature callbacks, movement, weapons, menus and multiplayer have focused native/functional coverage; a scripted campaign route is not a complete retail playthrough. **Closed since:** matched native state and input traces now exist for the six attract demos. `rand()`, player one and every creature agree with the console's own QuakeLoop on every frame to each demo's end (`tests/fixtures/lockstep_oracle.py`, `--ntsc` for US; 4 November section). The three behaviours no demo reaches were checked against the console's functions (`b55c902`). The whole-disc `--quick` sweep passed 163 of 163 PAL cases (2 November). An AddressSanitizer client ran the whole PAL disc clean (15 November). **Remaining:** the demos are three single-player levels at the self-play loadout and skill 1. Boss combat, multiplayer, the other levels and movement edge cases have no matched trace. The cross-zone teleport arm has run only in its unit test (15 November). A cross-zone teleport by players 2 to 4 would carry player one's state; no arena pad does one (`f196a4d`). The magazine-demo arm and SelfRecordOn are unmodelled and unreachable on a retail disc. | Oracle or retail traces for the remaining interactions, including boss combat, multiplayer and movement edge cases. |
+| PAL rendering | No paired retail scenes with matching camera, animation, lighting and RNG are available for current gameplay output. **Closed since:** every level's VRAM matches the console's own load, all 530 rectangles of 45 maps (`test_vram_native`; 4 November section, 5 November items; `5b55f99`). The camera build's row scales (0x80055DE4) and the SortData region rectangles match the oracle exactly at BASE3 frame 291 (4 November section). The display shows the 240 lines PutDispEnv programs (0.3.0; `6e9a190`). The fading-model ghost, textured shards and the sixteen-shadow budget are in (15 November). **Remaining:** no paired retail frame has been compared. The oracle records the view's position and angles but renders nothing. The one retail capture's darker gun arm is not texture data and is on the hardware list (5 November). The shadow cap has no capture, since no retail spawn reaches seventeen shadow-casting bodies. The fade's packet-pool exhaustion arm (0x8006A93C) is not modelled, and whether a corpse's dissolve sub-handlers write +0xFC is untraced (15 November). | Compare matched native frames, including near-eye geometry, translucency, water and split-screen. The oracle's per-frame view state can pose a port capture against a retail capture of the same demo frame. |
+| NTSC and other revisions | Selected US loader states now match independent native execution, and both PAL/US pass all-zone allocation coverage. **Closed since:** the three US attract demos match the console's `rand()` stream and player path to their ends (`09be4cf`, `42e2452`). `test_vram_native` matches every US level's VRAM (`5b55f99`). `test_client_audio` (0.3.0) and `check_split_screen.py` (`f196a4d`) pass on the US disc. **Remaining:** matched NTSC picture and audio captures are still missing. The film-sync timing check runs on PAL only; on US the NTSC cadence is checked by forcing 30 fps. No revision beyond SLES-01534 and SLUS-00757 is qualified. | Re-run behavior, picture, movie and audio acceptance against each supported build and qualify additional revisions separately. |
+| GPU timing | Unchanged since 28 October: GPU duration, CPU/DMA contention and scanout racing the draw stream are unmodeled. | Establish shipped-game impact with packet/bus traces, then implement any required timing behavior. |
+| GPU/GTE arithmetic coverage | Unchanged since 28 October: existing external golden vectors cover a subset of coordinates, windings, gradients and opcode modes. The 15 November rasteriser and clz rework was shown identical to the previous rasteriser: 60 frames compared byte for byte, 371,000 fuzzed primitives and an exhaustive clz check. That preserves the corpus's result but does not broaden it. | Broaden independent hardware acceptance data; do not derive expected values from the port. |
+| Flat-polygon allocation | Unchanged since 28 October. The client uses native heap accounting for known layouts. All 82 selected PAL/US load phases match native mission dispatch and loader results, with separate coverage of all 102 direct-level selections. Multiplayer's erroneous Tribute allocation is removed; US four-player TIMS now receives the native 5,664 packets. All 115 zones pass on each disc. Unknown layouts or rejected accounting retain the provisional fallback. | Qualify arbitrary outer-state histories and recording allocations. Intermission retention and view counts are still supplied as fixture context; loader traces and all-zone coverage do not establish whole-session/hardware parity. See the renderer audit. |
+| Final audio amplitude | Unchanged since 28 October: CD/main register values and gain units are fixed; the complete output chain lacks independent hardware measurements. | Measure final balance, clipping order and least-bit rounding with voices and CD mixed. |
+| XA and output conversion | Unchanged since 28 October: the mixer now stays at 44,100 Hz with the CD's 25-tap interpolation; the XA predictor, filter rounding/start state and device conversion remain unqualified against hardware. | Compare the complete CD waveform and final device output against independent hardware measurements. |
+| SPU transitions and coverage | Unchanged since 28 October: absolute key-on latency/phase/history, remaining fractional filter positions and general ADSR settings are not fully established. Two finite END/repeat captures are excluded from the steady-waveform suite. | Match independent transition captures, including those exclusions. The game-specific ADSR setting is `0000/0000`. |
+| Reserved ADPCM shifts | Unchanged since 28 October: the shift-12-through-15 hardware capture does not match the fallback; all 2,475 PAL samples use valid shifts. | Match an independently verified model, without treating this unused PAL edge case as a current audible defect. |
+| Movie synchronization | Unchanged since 28 October: software scheduling and fades work; initial hardware A/V phase, downstream device latency and long-run alignment are unmeasured. | Compare independent retail picture/audio captures and host output timing. |
+| Host audio devices | Unchanged since 28 October: missing/failed streams now retry, with nonfatal initialization and silent movie-clock continuity. Open default-device migration is delegated to SDL; physical switching and real speaker latency remain unqualified. | Exercise actual unplug/replug and default-device switching, and measure audible latency. Automated failures and real SDL dummy-output recovery are covered in the audio audit. |
+| Physical controllers | Automated tests cover synthetic events; physical ergonomics and rumble are not qualified. The lost-controller page (31 October; `acb2b9e`) and the split-screen pause ownership and lost-pad rescan (`f196a4d`) were added since. Both are tested only with synthetic SDL pads (`test_menu`, `test_client_menu --reinsert`, `test_client_split`). The port has no multi tap. | A specifically authorized hands-on session with the intended controllers. |
+| Undefined native memory | Enemy-less Boss1 aim and the stand-on-entity branch can depend on uninitialized PS1 stack history. The port uses documented defined behavior; both are signed off (RELEASING). Found since: BIGGUN's two SETWIBBLE items carry node −1, an out-of-table read-modify-write on the console that the port deliberately skips (15 November). The noise expiry's null-pointer read is listed under creature hearing. | Full machine-history evidence if reproducing these invalid/undefined states is required; another actor-state formula cannot establish equivalence. |
+| Historical reconstruction notes | **Closed:** no marker in `openquestions.md` is open (its 5 November status). The last eleven were settled from the consuming code or shown to have no reader on either disc. These include the scene residues #12a/#12b, the `Resources` fields #24, the remap values #22 (a debug readout's labels) and #2d's extents. The front-end residues #20e, #42 and #44 were settled the same day. **Remaining:** nothing open as a marker. The notebook's body text keeps historical claims that its status paragraphs supersede. | Count a functional defect only when a reachable behavioral effect is demonstrated. |
 
-The table contains twenty-one known remaining areas. It is an inventory of current
-evidence, not an assertion that every undiscovered bug has been enumerated.
+The table keeps the twenty-one areas of the 28 October version; none was
+dropped. The historical-notes row has nothing left open and stays so that its
+closure remains visible. The other twenty name what still remains. Of those,
+the hardware- and capture-bound rows (rendering, NTSC, GPU timing and vectors,
+the six audio rows and physical controllers) are the "qualifies after 1.0"
+class in [RELEASING](RELEASING.md). It is an inventory of current evidence, not
+an assertion that every undiscovered bug has been enumerated.
 
 CHD/MDS input, perspective-correct rendering, multiple host mice and revival of
 cut multiplayer modes are host extensions or intentionally unsupported features,

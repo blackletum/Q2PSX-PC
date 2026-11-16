@@ -9,9 +9,15 @@
  * is `duration << 16 | level`; a zero duration ends the run.
  *
  * Several are not one shape but a rhythm on the little motor — the shotgun's
- * 44 on, 8 off, 12 on, 52 off, 8 on is the pump — written as pairs of one-tick
- * spans that step the level between 4096 and 0 so the interpolation has
- * nothing to smooth.
+ * 44 on, 128 off, 12 on, 52 off, 8 on is the pump — written as pairs of
+ * one-tick spans that step the level between 4096 and 0 so the interpolation
+ * has nothing to smooth.
+ *
+ * The shotgun's first rest is the word 0x00800000 at 0x8009D278: 128 ticks.
+ * It was transcribed as 8, which brought the pump's second pulse (and the
+ * end of the pattern) in 120 ticks early;
+ * the data-global census of 16 November caught it, and `test_shock --disc`
+ * now compares every run here against the executable's own words.
  */
 static const q2_shock_point k_blaster_big[] = {           /* 0x8009D258 */
     { 2048, 48 }, { 1024, 0 } };
@@ -20,7 +26,7 @@ static const q2_shock_point k_blaster_little[] = {        /* 0x8009D260 */
 static const q2_shock_point k_shotgun_big[] = {           /* 0x8009D268 */
     { 3072, 28 }, { 4096, 0 } };
 static const q2_shock_point k_shotgun_little[] = {        /* 0x8009D270 */
-    { 4096, 44 }, { 4096, 1 }, { 0, 8 }, { 0, 1 }, { 4096, 12 },
+    { 4096, 44 }, { 4096, 1 }, { 0, 128 }, { 0, 1 }, { 4096, 12 },
     { 4096, 1 }, { 0, 52 }, { 0, 1 }, { 4096, 8 }, { 4096, 0 } };
 static const q2_shock_point k_sshotgun_big[] = {          /* 0x8009D298 */
     { 4096, 44 }, { 4096, 0 } };

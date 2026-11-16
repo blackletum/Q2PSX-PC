@@ -13,6 +13,8 @@
 #include <string.h>
 
 int main(int argc, char **argv);
+/* What main() refused, in the player's terms (main.c, client_fail). */
+extern char q2_client_failure[640];
 
 static bool redirected(HANDLE h)
 {
@@ -80,9 +82,12 @@ static int run_client(int argc, char **argv)
      * dialog nobody is there to close. */
     if (result && !cli && !developer && !console &&
         !redirected(output) && !redirected(errors)) {
-        char message[2304];
-        snprintf(message, sizeof(message), "Quake II could not start.%s%s",
-                 log_path[0] ? "\n\nDetails are saved in:\n" : "\nRun with --developer for details.", log_path);
+        /* The reason first, when main() gave one: "could not start" and a
+         * log path told a player who picked the wrong file nothing to do. */
+        char message[3072];
+        snprintf(message, sizeof(message), "Quake II could not start.%s%s%s%s",
+                 q2_client_failure[0] ? "\n\n" : "", q2_client_failure,
+                 log_path[0] ? "\n\nDetails are saved in:\n" : "\n\nRun with --developer for details.", log_path);
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Quake II", message, NULL);
     }
     return result;

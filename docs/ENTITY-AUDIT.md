@@ -734,6 +734,16 @@ acid/lava burn-sound gap found while wiring POWER1 is now covered, including
 retail's initial cadence and bank fallback. Creature implementation coverage is
 tracked separately in [CREATURE-AUDIT.md](CREATURE-AUDIT.md).
 
+Since then, the 5 November LevelBin census read all 458 functions in the 25
+distinct modules. The eight with reachable effects the port did not run are
+implemented (the section above). The 15 November symbol-census pass then fixed
+FLKLIGHT's per-zone enable (0x8002E648, 0x800287C8) and SIMROT2's step handler
+(0x8002F154). It also found BIGGUN's two SETWIBBLE items with node −1, an
+out-of-table write the port deliberately skips ([FUNCTIONAL-AUDIT](FUNCTIONAL-AUDIT.md),
+15 November). A census classifies functions; it does not cover their branches,
+so the static-fallback limit above stands. Not yet checked: whether any module
+imports the SoundSetVolume slot (+0x138).
+
 Retail's spawn-placement routine also sweeps runtime entity boxes before
 SecondaryColl. This former gap is closed by the shared placement work recorded
 in [CREATURE-AUDIT.md](CREATURE-AUDIT.md), including delayed activation against

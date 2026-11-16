@@ -335,21 +335,93 @@ q2_result disc_read_sector_payload(const disc *d, u32 lba, u8 *out, u32 *out_len
     return Q2_OK;
 }
 
-/* Read a run of consecutive Form 1 / Mode 1 sectors' user data. */
+/*
+ * How many sectors from `lba` (at most `max`) disc_read_raw_sector would read
+ * from one image track with consecutive file offsets, and that track: each
+ * one resolves to the same INDEX 01 range and the last ends inside the
+ * backing file. Zero when the first sector must take the per-sector path (a
+ * drive, a pregap or out-of-range sector, or one that ends past the file).
+ */
+#define DISC_RUN_CHUNK 64u
+static u32 disc_image_run(const disc *d, u32 lba, u32 max, const cd_track **out)
+{
+    const cd_track *t;
+    u32 n;
+    u64 first;
+
+    if (d->drive)
+        return 0;
+    t = disc_track_for_lba(d, lba);
+    if (!t || lba < t->start_lba || lba - t->start_lba >= t->length_sectors ||
+        t->file_index < 0 || t->file_index >= d->backing_count)
+        return 0;
+    first = t->file_offset + (u64)(lba - t->start_lba) * (u64)t->sector_size;
+    for (n = 0; n < max; n++) {
+        u32 at = lba + n;
+        if (at - t->start_lba >= t->length_sectors || disc_track_for_lba(d, at) != t ||
+            first + (u64)(n + 1) * (u64)t->sector_size > d->backing[t->file_index].size)
+            break;
+    }
+    *out = t;
+    return n;
+}
+
+/* Read a run of consecutive Form 1 / Mode 1 sectors' user data.
+ *
+ * Image sectors are read up to DISC_RUN_CHUNK at a time: one seek and one
+ * read instead of one of each per 2 KB, which was most of a level load's file
+ * time (the executable alone is read in full by ten table loaders). Each
+ * sector's bytes are those disc_read_raw_sector returns: a raw sector's user
+ * data by its mode byte, a cooked one's first 2048 bytes. Anything else (a
+ * drive, a pregap, a short read, a range error) goes sector by sector exactly
+ * as before, so the errors are the same too. */
 static q2_result disc_read_form1_run(const disc *d, u32 lba, u32 count, u8 *out)
 {
-    u32 i;
+    u32 i = 0;
+    u8 *chunk = NULL;
 
-    for (i = 0; i < count; i++) {
-        u8 raw[CD_SECTOR_RAW];
-        q2_result r = disc_read_raw_sector(d, lba + i, raw);
-        if (r != Q2_OK)
-            return r;
-        if (raw[15] == 2)
-            memcpy(out + (size_t)i * CD_SECTOR_FORM1, raw + 24, CD_SECTOR_FORM1);
-        else
-            memcpy(out + (size_t)i * CD_SECTOR_FORM1, raw + 16, CD_SECTOR_MODE1);
+    while (i < count) {
+        const cd_track *t = NULL;
+        u32 n = disc_image_run(d, lba + i, count - i < DISC_RUN_CHUNK ? count - i : DISC_RUN_CHUNK, &t);
+        if (n > 1) {
+            const backing_file *bf = &d->backing[t->file_index];
+            size_t stride = (size_t)t->sector_size, j;
+            u64 offset = t->file_offset + (u64)(lba + i - t->start_lba) * (u64)t->sector_size;
+            if (!chunk && !(chunk = (u8 *)malloc((size_t)DISC_RUN_CHUNK * CD_SECTOR_RAW)))
+                n = 0;
+            else if (stride > CD_SECTOR_RAW || file_seek(bf->fp, offset) != 0 ||
+                     fread(chunk, 1, stride * n, bf->fp) != stride * n)
+                n = 0;
+            if (n) {
+                for (j = 0; j < n; j++) {
+                    const u8 *s = chunk + j * stride;
+                    u8 *dst = out + (size_t)(i + j) * CD_SECTOR_FORM1;
+                    if (t->sector_size != CD_SECTOR_RAW)
+                        memcpy(dst, s, CD_SECTOR_MODE1);   /* synthesised Mode 2 header */
+                    else if (s[15] == 2)
+                        memcpy(dst, s + 24, CD_SECTOR_FORM1);
+                    else
+                        memcpy(dst, s + 16, CD_SECTOR_MODE1);
+                }
+                i += n;
+                continue;
+            }
+        }
+        {
+            u8 raw[CD_SECTOR_RAW];
+            q2_result r = disc_read_raw_sector(d, lba + i, raw);
+            if (r != Q2_OK) {
+                free(chunk);
+                return r;
+            }
+            if (raw[15] == 2)
+                memcpy(out + (size_t)i * CD_SECTOR_FORM1, raw + 24, CD_SECTOR_FORM1);
+            else
+                memcpy(out + (size_t)i * CD_SECTOR_FORM1, raw + 16, CD_SECTOR_MODE1);
+            i++;
+        }
     }
+    free(chunk);
     return Q2_OK;
 }
 

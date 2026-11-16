@@ -2,6 +2,7 @@
  * injected. GPU checks use a hidden window and engine render targets. */
 #include "../src/client/launcher.c"
 #include "controller_fixture.h"
+#include "other_disc_fixture.h"
 
 static int checks, failures;
 #define CHECK(x) do { checks++; if (!(x)) { \
@@ -230,6 +231,38 @@ static void disc_controller_flow(launcher *l, const char *disc_path)
     CHECK(q2_launch_path_same(l->cfg.last, disc_path));
 }
 
+/* What the selector says about images that do not open, and about a
+ * PlayStation disc that is not this game (other_disc_fixture.h): that one
+ * used to be listed READY as "Quake II (uncatalogued build)". */
+static void problem_checks(launcher *l)
+{
+    char path[512];
+    const char *tmp = SDL_getenv("TEMP");
+    src_entry *s;
+
+    if (!tmp || !*tmp) tmp = SDL_getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = ".";
+    l->count = 0;
+    snprintf(path, sizeof(path), "%s/q2psx_launcher_other_%u.iso", tmp, 7u);
+    CHECK(write_other_psx_disc(path));
+    s = add_image(l, path);
+    CHECK(s && s->state == SRC_NOT_Q2);
+    l->sel = 0;
+    CHECK(!activate(l) && l->status_error);
+    CHECK(strstr(l->status, "not a Quake II") != NULL);
+    remove(path);
+
+    snprintf(path, sizeof(path), "%s/q2psx_launcher_notrack_%u.cue", tmp, 7u);
+    {
+        FILE *fp = fopen(path, "wb");
+        if (fp) { fputs("FILE \"gone (Track 1).bin\" BINARY\r\n", fp); fclose(fp); }
+    }
+    take_path(l, path);
+    CHECK(l->status_error && strstr(l->status, "Missing track file: gone (Track 1).bin"));
+    remove(path);
+    l->count = 0;
+}
+
 int main(int argc, char **argv)
 {
     launcher *l = SDL_calloc(1, sizeof(*l));
@@ -259,7 +292,7 @@ int main(int argc, char **argv)
         CHECK(present(l));
         CHECK(SDL_SaveBMP(l->surface, argv[1]));
         if (argc > 7 && !strcmp(argv[7], "exercise")) disc_controller_flow(l, argv[2]);
-    } else { layout_checks(l); controller_checks(l); }
+    } else { layout_checks(l); controller_checks(l); problem_checks(l); }
     shutdown_ui(l, false);
     SDL_free(l);
     if (argc == 1) gpu_handoff();

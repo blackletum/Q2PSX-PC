@@ -81,7 +81,7 @@ const u8 q2_screen_meter_rgb[Q2_SCREEN_METER_BARS][3] = {
     { 255,   0, 255 },   /* 0x800AECB4 */
     { 255, 255, 255 },   /* 0x800AECB8 */
     { 255,   0, 255 },   /* 0x800AECB4 again, at 0x80077174 */
-    { 255,   0, 255 }    /* 0x800AECBC, one past the block the port can read */
+    { 128, 128, 255 }    /* 0x800AECBC, read at 0x800771CC                */
 };
 
 /*

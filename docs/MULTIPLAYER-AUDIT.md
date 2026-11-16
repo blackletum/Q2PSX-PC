@@ -60,7 +60,15 @@ The [functional follow-up](FUNCTIONAL-AUDIT.md) gives each pausing player an
 independent controller profile, including style, inversion, vibration and slider
 values, persisted in settings cards and saved games. It also documents the newly
 restored player setup and its native viewport calls. Keyboard/mouse and controller-slot
-assignment are host adapters. Physical controller ergonomics and rumble need a
+assignment are host adapters. Since 16 November (`f196a4d`), the pause belongs to
+the player who paused rather than to the host pad slot. GameCheckPaused scans
+only the session's players (0x8003E780..0x8003E7D0) and stores that index as
+`Pauser` (0x8003E890). Only the pauser's START unpauses (0x8003E7E0..0x8003E828),
+and the front end reads that player's pad (0x8001A0EC). Lost pads are rescanned
+every frame, as 0x8003E6C4..0x8003E6F4 asks every player. `test_client_split`
+checks both with synthetic pads. Still unreachable rather than modelled: a
+cross-zone teleport by players 2 to 4 would carry player one's state, and no
+arena teleport pad leaves its own zone 0. Physical controller ergonomics and rumble need a
 hands-on session; automated tests use synthetic SDL controller events without
 reading or controlling the user's input devices.
 

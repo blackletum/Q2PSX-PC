@@ -9,6 +9,8 @@
 #include <string.h>
 
 #include "shock.h"
+#include "disc.h"
+#include "exe.h"
 
 static int g_checks;
 static int g_failures;
@@ -61,6 +63,91 @@ static void test_table(void)
               "only Stomp and Impact_Distinct stack");
         check(d->big && d->little, "every record has both envelopes");
     }
+
+    /* ShockPoint_ShotgunLittle's third word, 0x8009D278, is 0x00800000: a
+     * 128-tick rest at level 0. It was transcribed as 8. */
+    {
+        const q2_shock_data *sg = q2_shock_find(Q2_SHOCK_SHOTGUN);
+
+        check(sg && sg->little[2].level == 0, "the shotgun pump's first rest is off");
+        check_eq_s32(sg ? sg->little[2].duration : -1, 128,
+                     "and lasts 128 ticks (0x8009D278)");
+    }
+}
+
+/*
+ * --disc: every record, both envelopes, word for word against the disc's
+ * executable, SLES-01534's addresses translated for the US build.
+ * A disc word is `duration << 16 | level`, and a run ends at the first word
+ * whose duration is zero, which is compared too.
+ */
+static void test_disc(const char *path)
+{
+    disc *d = NULL;
+    q2_exe exe;
+    u32 i, list;
+
+    puts("the patterns against the executable");
+    memset(&exe, 0, sizeof(exe));
+    check(disc_open(&d, path) == Q2_OK, "the disc opens");
+    if (!d)
+        return;
+    check(q2_exe_load(&exe, d, NULL) == Q2_OK, "the executable loads");
+    if (!exe.file.data) {
+        disc_close(d);
+        return;
+    }
+    check(q2_exe_has_layout(&exe), "the build's layout is catalogued");
+
+    /* ShockDataAvailable, 0x8009D4E0: the record pointers, NULL-ended. */
+    list = q2_exe_addr(&exe, 0x8009D4E0u);
+    for (i = 0; i <= Q2_SHOCK_PATTERNS; i++) {
+        const q2_shock_data *want = q2_shock_available[i];
+        u32 rec = 0, ptr[2] = { 0, 0 }, word = 0;
+        int env;
+
+        if (!q2_exe_u32(&exe, list + 4 * i, &rec)) {
+            check(false, "ShockDataAvailable is readable");
+            break;
+        }
+        if (!want) {
+            check_eq_s32((s32)rec, 0, "the list ends where the port's does");
+            break;
+        }
+        check(rec == q2_exe_addr(&exe, want->addr), want->name);
+        if (!q2_exe_u32(&exe, rec, &ptr[0]) ||
+            !q2_exe_u32(&exe, rec + 4, &ptr[1]) ||
+            !q2_exe_u32(&exe, rec + 8, &word)) {
+            check(false, "a record is readable");
+            continue;
+        }
+        check_eq_s32((s32)(word & 0xFFFFu), want->flags, "record flags");
+        check_eq_s32((s32)(word >> 16), want->id, "record id");
+
+        for (env = 0; env < 2; env++) {
+            const q2_shock_point *pt = env ? want->little : want->big;
+            u32 k;
+
+            for (k = 0; k < 64; k++) {
+                u32 w = 0;
+                char what[96];
+
+                if (!q2_exe_u32(&exe, ptr[env] + 4 * k, &w)) {
+                    check(false, "an envelope word is readable");
+                    break;
+                }
+                snprintf(what, sizeof(what), "%s %s point %u",
+                         want->name, env ? "little" : "big", (unsigned)k);
+                check_eq_s32(pt[k].level, (s16)(w & 0xFFFFu), what);
+                check_eq_s32(pt[k].duration, (s16)(w >> 16), what);
+                if (pt[k].duration == 0 || (w >> 16) == 0)
+                    break;
+            }
+        }
+    }
+
+    q2_exe_free(&exe);
+    disc_close(d);
 }
 
 static void test_machinegun(void)
@@ -302,9 +389,11 @@ static void test_sink(void)
           "and the next step stacks in slot 1: Stomp does not merge");
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     test_table();
+    if (argc == 3 && strcmp(argv[1], "--disc") == 0)
+        test_disc(argv[2]);
     test_machinegun();
     test_merge_and_stack();
     test_dead_and_hold();

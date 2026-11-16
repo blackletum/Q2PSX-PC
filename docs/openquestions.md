@@ -13,19 +13,20 @@ Two of them changed a finding rather than closing a gap. #17's sample heap
 starts at `0x1010`, so FRAGTOWE's last sound never loads on the console. #22's
 remap values are a debug readout's labels. Each entry gives its own
 evidence. The front-end residues (#20e, #42's page-11 BACK case and #44)
-are being closed from the module.
+were closed from the module the same day; each entry is marked 5 November.
 
 **LevelBin census follow-up (5 November).** A census of all 458 functions in the 25 distinct LevelBin modules found eight with reachable effects the port did not reproduce. The module help-computer briefings (JAIL2, JAIL3, SECURITY, BOSS1, BOSS2), BASE2's EDrawbridge solid box and the QENDMIS uplink screen are now implemented (ENTITY-AUDIT, 5 November). `block+0x78` is `InSelfPlayMode`, not a team/flag enable. *Both follow-ups settled the same day.* The self-play attract demo runs: each level's init reads `InSelfPlayMode` through engine+0x78, writes its loadout and calls SelfPlayOn on its recording (PAL and US both at `+0x8B4`/`+0x788`/`+0x7F4`); a record word is buttons `& 0xFFF0` plus the frame's length in video fields, nibble bits 3/0/1/2 worth 1/2/4/8; and every demo returns to the title through QuakeNextDemoLevel's state 6 (FUNCTIONAL-AUDIT). QuakeEndSelfPlay is stored only as SelfPlayOn's unread third argument and is never reached. `GameNewMission` does not use a carried LOADMAP at all: it empties the name from `0x800AC670` and each unit's hub writes a fixed first level (Jail2, Power1, Command, Boss1) at `Default`.
 
 **Status of 28 October 2026:** this file is a chronological research
 notebook, not the current completion checklist. The
-[functional audit's remaining-work table](FUNCTIONAL-AUDIT.md#consolidated-remaining-work-28-october)
+[functional audit's remaining-work table](FUNCTIONAL-AUDIT.md#consolidated-remaining-work-16-november)
 and the linked subsystem audits describe the current limits. All 22 creature
 modules, including Jorg, Rider and Medic, now have native implementations and
 the shared actor path is reconstructed. Historical claims below that those
 implementations are missing, or that no questions remain open, are superseded.
 Unresolved markers in older entries still need reconciliation with subsequent
 native evidence; they do not by themselves establish a current gameplay bug.
+(That reconciliation was finished on 5 November; see the current status above.)
 
 **Historical creature coverage correction (2026-10-23; superseded by the 28 October status above:
 Jorg, Rider and Medic are implemented):** the earlier seven-module census

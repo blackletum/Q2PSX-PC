@@ -75,8 +75,9 @@ work three ways:
    - CTF and Tag stay cut;
    - saves are the port's own format;
    - no perspective-correct mode;
-   - the host-clock seed in interactive play, where the console reads its
-     root counter;
+   - the host-clock seed in interactive multiplayer, where the console reads
+     its root counter (every single-player load seeds 13 on both,
+     0x80070DF0..0x80070E30);
    - the player's settings come back after an attract demo, where the console
      leaves its defaults in place.
 

@@ -963,7 +963,10 @@ u32 q2_creature_world_tick(q2_creature_world *w, const s32 player_origin[3],
  * because FindTarget's "already got one" returned first. See the note on
  * `noise` in creworld.h.
  *
- * The console's early outs: none at all in multiplayer (0x800AEBCC), none for
+ * The console's early outs: none at all in multiplayer — 0x80062BF4 tests id's
+ * `deathmatch->value`, the word at +20 of the cvar record 0x800A3E94 that the
+ * pointer `deathmatch` (0x800AECFC) names, which nothing writes, and NOT the
+ * multiplayer flag LevelIsMultiPlayer (0x800AEBCC) — none for
  * a NOTARGET player (0x80062C14), and the silencer's quiet shots (type 1,
  * 0x80062BC8). No shipped map places a silencer, and the callers in this port
  * raise noise only in single player.

@@ -148,7 +148,7 @@
     <div class="cover-inner">
       <div class="masthead">
         <div class="identity">Q2PSX-PC</div>
-        <div class="edition"><span id="build-version">Development edition</span><br>Guide revised <time datetime="2026-10-28">28 October 2026</time></div>
+        <div class="edition"><span id="build-version">Development edition</span><br>Guide revised <time datetime="2026-11-16">16 November 2026</time></div>
       </div>
       <p class="eyebrow">Installation &amp; play</p>
       <h1>User guide</h1>
@@ -181,7 +181,8 @@
           <li><strong>Choose your disc.</strong><p>Select a listed disc, or choose <strong>BROWSE IMAGE</strong> and open your <code>.cue</code> file. You can also drop an image onto the selector. Select <strong>START GAME</strong>.</p><p class="small">Keep the CUE and every BIN track it names together, with their original filenames. If the disc is missing from the list, use Browse; you do not need to copy it into the game folder.</p></li>
           <li><strong>Start the campaign.</strong><p>After the logos and intro, choose <strong>START → SINGLE PLAYER → NEW GAME</strong>, then a difficulty. The opening film leads into the first level. A key press or click skips the current logo or film.</p></li>
         </ol>
-        <p>The selector remembers your last disc. To change it next time, run the executable without a <code>--disc</code> argument.</p>
+        <p>The selector remembers your last disc. To change it next time, run the executable without a <code>--disc</code> argument. On Windows you can also drop a <code>.cue</code> file onto <code>q2psx.exe</code> to start that disc directly.</p>
+        <p class="small">The remembered discs are kept in <code>%APPDATA%\Q2PSX-PC\launcher.cfg</code> on Windows, or <code>~/.config/q2psx-pc/launcher.cfg</code> on Linux and macOS (<code>$XDG_CONFIG_HOME/q2psx-pc/</code> when set). Deleting the file only clears the list. The <code>Q2PSX_LAUNCHER_CFG</code> environment variable names another file.</p>
         <h3>Supported discs and image formats</h3>
         <p>The identified releases are Europe <code>SLES-01534</code> and USA <code>SLUS-00757</code>. Other revisions are not established as supported.</p>
         <table>
@@ -215,6 +216,7 @@
             <tr><th scope="row">Screenshot</th><td><kbd>F11</kbd> writes <code>q2psx-000.ppm</code>, then numbered files, in the working folder. Move captures before another session; numbering restarts at zero.</td></tr>
           </tbody>
         </table>
+        <p class="small">Some keys are diagnostic tools rather than game controls. During play the number keys <kbd>0</kbd>–<kbd>9</kbd> load that zone of the current level and respawn you in it, so a stray press can look like a level jump. <kbd>V</kbd> cycles aspect modes, <kbd>P</kbd> shows the view’s coordinates, <kbd>F1</kbd> toggles dithering, <kbd>F3</kbd> forces underwater, <kbd>F4</kbd> switches to a free-flying camera, <kbd>F5</kbd> cycles split-screen layouts, and <kbd>F6</kbd> toggles the glint effect. Press <kbd>P</kbd>, <kbd>F1</kbd>, <kbd>F3</kbd>, <kbd>F4</kbd> or <kbd>F6</kbd> again to undo it; <kbd>V</kbd> and <kbd>F5</kbd> return to the start of their cycle.</p>
         <h3>Menus</h3>
         <p>Use the arrows to navigate, <kbd>Enter</kbd> or <kbd>Space</kbd> to select, and <kbd>Esc</kbd> or <kbd>Backspace</kbd> to go back. The mouse can select rows and drag sliders; right-click goes back. At a mission tally, press <strong>Fire</strong> to continue.</p>
         <h3>Gamepads</h3>
@@ -287,9 +289,9 @@
         <h2 id="troubleshooting-title"><span class="number">06 / Recovery</span>Troubleshooting</h2>
         <dl>
           <dt>The disc is missing or will not open.</dt>
-          <dd>Use <strong>BROWSE IMAGE</strong> and select the CUE. Check that its referenced track files exist with matching names. If using a physical disc, insert it and refresh the selector with <kbd>F5</kbd>. On Linux, check your account’s permission to read the optical drive.</dd>
+          <dd>Use <strong>BROWSE IMAGE</strong> and select the CUE. Check that its referenced track files exist with matching names; the selector, and the error box shown when a <code>--disc</code> launch fails, name a track file that is missing. If using a physical disc, insert it and refresh the selector with <kbd>F5</kbd>. On Linux, check your account’s permission to read the optical drive.</dd>
           <dt>The selector says this is not a Quake II PlayStation disc.</dt>
-          <dd>Confirm the edition and serial against <a href="#first-launch">Supported discs</a>. Do not rename a compressed image to BIN or ISO; use a supported image of your own disc.</dd>
+          <dd>Confirm the edition and serial against <a href="#first-launch">Supported discs</a>. Another PlayStation game, or the PC edition’s <code>baseq2</code> folder or <code>pak0.pak</code>, is refused by name. Do not rename a compressed image to BIN or ISO; use a supported image of your own disc.</dd>
           <dt>Levels work, but music or films are missing.</dt>
           <dd>Use a complete raw CUE/BIN image. A 2048-byte ISO or a drive that only returns cooked sectors lacks the XA data needed for music and films. Also check the Music volume under Sound Options.</dd>
           <dt>Windows reports a missing SDL3.dll.</dt>
@@ -316,14 +318,15 @@
 .\q2psx.exe --disc E:</code></pre>
         <h3>Linux / macOS terminal</h3>
         <pre><code>./q2psx --disc "/path/to/Quake II/game.cue"</code></pre>
-        <p class="small">For a physical drive on Linux, use <code>--disc /dev/sr0</code>. Physical-drive support is not implemented on macOS; use a disc image.</p>
+        <p class="small">For a physical drive on Linux, use <code>--disc /dev/sr0</code>. Physical-drive support is not implemented on macOS; use a disc image. The word <code>--disc</code> may be left off: a path on its own is taken as the disc. A mistyped option or a value out of range stops the launch with a message naming it.</p>
         <table>
-          <caption>Common options; --help lists the full diagnostic interface.</caption>
+          <caption>Common options; --help lists every option, the developer and capture ones in a section of their own.</caption>
           <thead><tr><th scope="col">Option</th><th scope="col">Purpose</th></tr></thead>
           <tbody>
             <tr><th scope="row"><code>--launcher</code></th><td>Show the selector even when a disc argument is supplied.</td></tr>
             <tr><th scope="row"><code>--size 1280x720</code></th><td>Set the initial window size.</td></tr>
-            <tr><th scope="row"><code>--aspect 4:3</code></th><td>Use a traditional view. <code>auto</code> follows the window shape.</td></tr>
+            <tr><th scope="row"><code>--aspect 4:3</code></th><td>Use a traditional view. <code>auto</code> follows the window shape; <code>tv</code>, <code>square</code> and <code>stretch</code> are the other choices.</td></tr>
+            <tr><th scope="row"><code>--scale 2</code></th><td>Set the starting window size as a multiple of the console picture, from 1 to 8 (default 3).</td></tr>
             <tr><th scope="row"><code>--crt</code> / <code>--no-crt</code></th><td>Enable or disable CRT presentation for this launch.</td></tr>
             <tr><th scope="row"><code>--bloom</code> / <code>--no-bloom</code></th><td>Enable or disable scene bloom for this launch.</td></tr>
             <tr><th scope="row"><code>--saves "path"</code></th><td>Choose the save folder.</td></tr>
@@ -342,7 +345,7 @@
         <p>The renderer and audio work acknowledge references from Mednafen, PCSX-Redux, ps1-tests and Nugget. This manual includes no commercial game artwork, disc-derived images or redistributed fonts.</p>
       </section>
       <footer>
-        <p>Q2PSX-PC · User guide · Revised 28 October 2026<br>Formatting follows the Q2PSX design reference’s document mode.</p>
+        <p>Q2PSX-PC · User guide · Revised 16 November 2026<br>Formatting follows the Q2PSX design reference’s document mode.</p>
         <p class="back-top"><a href="#top">Back to top ↑</a></p>
       </footer>
     </main>

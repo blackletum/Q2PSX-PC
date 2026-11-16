@@ -795,7 +795,7 @@ static void reinsert_checks(void)
         CHECK(c->gamepads.id[0] == id);
     }
 
-    CHECK(client_reinsert_open(c, 0));
+    CHECK(client_reinsert_open(c, 0, 0));
     CHECK(c->menu.open);
     CHECK(c->menu.page_id == Q2_PAGE_NO_CONTROLLER);
     CHECK(q2_menu_reinsert_open(&c->menu));
@@ -835,12 +835,12 @@ static void reinsert_checks(void)
      * GameCheckPaused belongs to the game. */
     q2_menu_init(&c->menu, &c->settings, 248);
     c->film_open = true;
-    CHECK(!client_reinsert_open(c, 0));
+    CHECK(!client_reinsert_open(c, 0, 0));
     c->film_open = false;
     c->in_front_end = true;
-    CHECK(!client_reinsert_open(c, 0));
+    CHECK(!client_reinsert_open(c, 0, 0));
     c->in_front_end = false;
-    CHECK(client_reinsert_open(c, 0));
+    CHECK(client_reinsert_open(c, 0, 0));
 
     free(c);
 }
@@ -884,7 +884,7 @@ static void capture_reinsert(const char *disc, const char *dir)
     e.type = SDL_EVENT_GAMEPAD_REMOVED; e.gdevice.which = id;
     CHECK(q2_gamepads_event(&c->gamepads, &e) == 0);
     CHECK(SDL_DetachVirtualJoystick(id));
-    CHECK(client_reinsert_open(c, 0));
+    CHECK(client_reinsert_open(c, 0, 0));
     CHECK(q2_menu_reinsert_open(&c->menu));
     for (frame = 0; frame < 4; frame++) {
         q2_screen_tick_dt(&c->screen, 1.0 / 30.0);

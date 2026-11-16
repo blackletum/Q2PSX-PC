@@ -104,7 +104,9 @@
 #include <SDL3/SDL.h>
 
 #include <stdio.h>
+#include <errno.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -137,6 +139,7 @@
 #include "hudtables.h"
 #include "ident.h"
 #include "launcher.h"
+#include "launchcfg.h"
 #include "item.h"
 #include "loadout.h"
 #include "itemtable.h"
@@ -18139,8 +18142,16 @@ static void shot_path_for(const char *base, long frame, bool numbered,
                           char *out, size_t out_sz)
 {
     if (numbered) {
-        const char *dot = strrchr(base, '.');
-        size_t stem = dot ? (size_t)(dot - base) : strlen(base);
+        /* The extension is the file name's, not a directory's: a bare
+         * `../shots/frame` once came out as `._0001./shots/frame`. */
+        const char *name = base, *dot, *q;
+        size_t stem;
+
+        for (q = base; *q; q++)
+            if (*q == '/' || *q == '\\')
+                name = q + 1;
+        dot  = strrchr(name, '.');
+        stem = dot ? (size_t)(dot - base) : strlen(base);
 
         if (stem > out_sz - 32)
             stem = out_sz - 32;
@@ -22774,55 +22785,148 @@ static void client_frame(client *c)
 
 
 /* ------------------------------------------------------------------------- */
+/* The command line                                                           */
+/* ------------------------------------------------------------------------- */
+/*
+ * WHY A RUN DID NOT START, kept for the Windows entry point's message box.
+ *
+ * A player who double-clicked the executable has no console: the box used to
+ * say only "Quake II could not start" and where the log was. Every refusal the
+ * player can act on goes through `client_fail`, which prints it and keeps it
+ * here so the box can say what went wrong and what to do (entry_win.c).
+ */
+extern char q2_client_failure[640];
+char q2_client_failure[640];
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 1, 2)))
+#endif
+static void client_fail(const char *fmt, ...)
+{
+    char line[512];
+    size_t used = strlen(q2_client_failure);
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "q2psx: %s\n", line);
+    if (used + 2 < sizeof(q2_client_failure))
+        snprintf(q2_client_failure + used, sizeof(q2_client_failure) - used,
+                 "%s%s", used ? "\n" : "", line);
+}
+
+/*
+ * A command-line number, whole or not at all.
+ *
+ * The parser used to read numbers with atoi() and strtol(..., NULL, 10), which
+ * turn "abc" into 0 and "12x" into 12 without a word: `--frames abc` ran one
+ * frame and exited 0, `--zone x` loaded zone 0, `--weapon 42` was ignored. A
+ * script cannot tell any of those from what it asked for.
+ */
+static bool client_arg_long(const char *flag, const char *text,
+                            long lo, long hi, long *out)
+{
+    char *end = NULL;
+    long v;
+
+    errno = 0;
+    v = strtol(text, &end, 10);
+    if (end == text || *end || errno == ERANGE || v < lo || v > hi) {
+        client_fail("%s wants a whole number from %ld to %ld, not '%s'",
+                    flag, lo, hi, text);
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
+/* The flags that take a value, so a value left off the end of the line is
+ * reported as missing rather than as an unknown option. */
+static bool client_flag_takes_value(const char *flag)
+{
+    static const char *const valued[] = {
+        "--disc", "--map", "--zone", "--scale", "--size", "--aspect",
+        "--saves", "--shot", "--shot-display", "--shot-effects", "--shot-every",
+        "--screen-pos", "--frames", "--at", "--yaw", "--pitch", "--movie",
+        "--watch-hold", "--continues", "--ot-range", "--fire-event",
+        "--save-load", "--objectives", "--pause", "--press", "--restart",
+        "--weapon", "--powerup", "--armour", "--trace-cre", "--dm-mode",
+        "--dm-players", "--dm-split", "--dm-frags", "--dm-rounds",
+        "--dm-minutes",
+    };
+    size_t i;
+
+    for (i = 0; i < Q2PSX_ARRAY_COUNT(valued); i++)
+        if (!strcmp(flag, valued[i]))
+            return true;
+    return false;
+}
+
 static void usage(void)
 {
     printf("q2psx - native Quake II PSX\n\n");
-    printf("usage: q2psx [--disc <path>] [--map NAME] [--zone N] [--scale N]\n"
-           "             [--aspect MODE] [--saves DIR]\n\n");
-    printf("  --disc   a .cue, .bin, .img or .iso, or a drive letter; without\n"
-           "           it a launcher lists your discs and drives and starts\n"
-           "           on the one played last\n");
-    printf("  --launcher  show the in-window source selector, even with --disc\n");
-    printf("              --launcher --headless --shot P.bmp captures this page\n");
-    printf("  --developer  open a diagnostic console on Windows and enable debug logs\n");
-    printf("  --map    level directory name (default BASE0)\n");
-    printf("  --zone   zone index within the map (default: the level's own\n"
-           "           start, its \"Default\" arrival point)\n");
-    printf("  --no-loadout  start with the blaster alone; otherwise --map\n"
-           "           hands the player what the campaign would have by\n"
-           "           then (q2psx-inspect loadout prints the table)\n");
-    printf("  --scale  buffer pixels across, i.e. horizontal zoom (default 3)\n");
-    printf("  --aspect auto (default) | 4:3 | tv | square | stretch\n");
-    printf("           auto   expand FOV and fit UI to the window's aspect\n");
-    printf("  --size WxH  initial window or headless display size (e.g. 1920x1080)\n");
-    printf("           4:3    the drawn buffer as 4:3, as the game is played\n");
-    printf("           tv     the strict pixel shape, 2:3 on PAL: 3%% taller\n");
-    printf("           square one buffer pixel per window pixel: a 1.5x stretch\n");
+    printf("usage: q2psx [--disc] <path> [options]\n\n");
+    printf("  --disc PATH   a .cue, .bin, .img or .iso, or a drive letter (the\n"
+           "                --disc may be left off); without one a selector lists\n"
+           "                your discs and drives and starts on the one played last\n");
+    printf("  --launcher    show the in-window source selector, even with --disc\n"
+           "                (--launcher --headless --shot P.bmp captures this page)\n");
+    printf("  --saves DIR   where save files live (default: the platform's own)\n");
+    printf("  --scale N     buffer pixels across, i.e. horizontal zoom (1..8, default 3)\n");
+    printf("  --size WxH    initial window or headless display size (e.g. 1920x1080)\n");
+    printf("  --aspect MODE auto (default) | 4:3 | tv | square | stretch\n");
+    printf("           auto    expand FOV and fit UI to the window's aspect\n");
+    printf("           4:3     the drawn buffer as 4:3, as the game is played\n");
+    printf("           tv      the strict pixel shape, 2:3 on PAL: 3%% taller\n");
+    printf("           square  one buffer pixel per window pixel: a 1.5x stretch\n");
     printf("           stretch fill the window, whatever shape it is\n");
-    printf("  --saves  where save files live (default: the platform's own)\n");
-    printf("\n  --version, -v  what this build is, and the commit it came from\n");
-    printf("\n  running without a player:\n");
-    printf("  --headless    no visible window or audio; fixed 1/30 s (GPU captures use a hidden context)\n");
-    printf("  --demo        drive the pad from a fixed script rather than keys\n");
-    printf("  --dm --dm-players N  start a split-screen arena match (1..4)\n");
-    printf("  --dm-split horizontal|vertical  choose the two-player split\n");
-    printf("  --dm-rounds N  rounds needed to win Versus (1..32767)\n");
-    printf("  --gamepad-player-one  assign four pads starting with player one\n");
+    printf("  --crt / --no-crt  CRT display emulation (default off)\n");
+    printf("  --bloom / --no-bloom  scene-only GPU bloom (default off, excludes HUD)\n");
+    printf("  --crt-cpu     use the CPU reference/fallback display instead of the\n"
+           "                GPU (no bloom)\n");
     printf("  --crosshair / --no-crosshair  override the crosshair setting\n");
     printf("  --vibration / --no-vibration  override the VIBRATION setting\n");
-    printf("  --watch       frame and aim at the nearest live creature\n");
-    printf("  --watch-hold N  ...and keep a killed creature framed for N frames\n");
+    printf("  --gamepad-player-one  assign four pads starting with player one\n");
+    printf("  --boot        the logo screens and intro film before the menu\n");
+    printf("  --no-boot     ...and skip them in a run that would show them\n");
+    printf("  --developer   open a diagnostic console on Windows and enable debug logs\n");
+    printf("  --version, -v what this build is, and the commit it came from\n");
+    printf("  --help, -h    this list\n");
+
+    printf("\n  starting somewhere other than the title menu:\n");
+    printf("  --map NAME    a level directory (BASE1, MATRIX1...) or a level-table\n"
+           "                name; q2psx-inspect levels <disc> lists them\n");
+    printf("  --zone N      zone index within the map (default: the level's own\n"
+           "                start, its \"Default\" arrival point)\n");
+    printf("  --no-loadout  start with the blaster alone; otherwise --map\n"
+           "                hands the player what the campaign would have by\n"
+           "                then (q2psx-inspect loadout prints the table)\n");
+    printf("  --new-game    confirm a difficulty: the opening reel, then level 1\n");
+    printf("  --credits     open the credits roll\n");
     printf("  --movie NAME  play a film from Q2DATA/MOVIES and nothing else\n"
            "                (TAKE1BP.STX, OUTRO1P.STX, ROGUEINP.STX on PAL;\n"
            "                 TAKE1B.STX, OUTRO1.STX, ROGUEIN1.STX on NTSC)\n");
-    printf("  --new-game    confirm a difficulty: the opening reel, then level 1\n");
-    printf("  --boot        the logo screens and intro film before the menu\n");
-    printf("  --no-boot     ...and skip them in a run that would show them\n");
+
+    printf("\n  local multiplayer:\n");
+    printf("  --dm          start a split-screen arena match (MATRIX1 unless --map)\n");
+    printf("  --dm-players N  2..4 players (default 2)\n");
+    printf("  --dm-mode N   0 deathmatch (default), 1 team deathmatch, 5 versus\n"
+           "                (2..4 are the disc's cut flag modes)\n");
+    printf("  --dm-split horizontal|vertical  choose the two-player split\n");
+    printf("  --dm-frags N  frag limit, -1 for none\n");
+    printf("  --dm-minutes N  time limit in minutes, -1 for none\n");
+    printf("  --dm-rounds N  rounds needed to win Versus (1..32767)\n");
+
+    printf("\n  developer and test options (captures and scripted runs, not play):\n");
+    printf("  --headless    no visible window or audio; fixed 1/30 s (GPU captures use a\n"
+           "                hidden context). Needs --disc. Pass it for any run whose\n"
+           "                numbers or pictures are compared\n");
+    printf("  --demo        drive the pad from a fixed script rather than keys\n");
     printf("  --frames N    stop after N frames\n");
+    printf("  --report      print the run's own counters at exit, one\n"
+           "                'report.<group>.<name> <integer>' per line\n");
     printf("  --shot P.ppm  write the console's own framebuffer to P.ppm\n");
-    printf("  --crt / --no-crt  CRT display emulation (default off)\n");
-    printf("  --bloom / --no-bloom  scene-only GPU bloom (default off, excludes HUD)\n");
-    printf("  --crt-cpu  use the CPU reference/fallback display instead of the GPU (no bloom)\n");
     printf("  --shot-display P.ppm  the WINDOW alongside --shot's buffer: the\n"
            "                frame placed as the television is shown it, 240 lines\n"
            "                of the buffer where SCREEN POSITION puts them\n"
@@ -22831,26 +22935,44 @@ static void usage(void)
            "                applied, which the placed capture does not carry\n");
     printf("  --shot-every N  ...and one every N frames, numbered\n");
     printf("  --screen-pos X Y  override SCREEN POSITION (-20..20, -32..64)\n");
-    printf("  --powerup KIND hold quad|invuln|enviro|breather for HUD capture\n");
-    printf("  --pause N     press START at frame N: the pause menu, for capture\n");
-    printf("  --press N     press a key at frame N: ends the attract demo or skips a film\n");
-    printf("  --restart N   take RESTART LEVEL at frame N, for capture\n");
-    printf("  --fire-event NAME [F]  queue ONE named Events entry point at\n"
-           "                frame F, instead of every trigger volume on the\n"
-           "                map. Level authors name the interesting ones\n"
-           "                (BIGGUN: PLATFORM, DestroyGlass, GravTeleport)\n");
     printf("  --at X,Y,Z    stand here instead of at the zone's spawn point\n");
     printf("  --yaw N       ...facing this way (the engine's 0..4095)\n");
     printf("  --pitch N     ...and looking this far up or down\n");
     printf("  --coords      show the view's world position and angles along\n"
            "                the top of the frame; the P key toggles the same\n"
            "                readout while you play\n");
+    printf("  --watch       frame and aim at the nearest live creature\n");
+    printf("  --watch-hold N  ...and keep a killed creature framed for N frames\n");
+    printf("  --god         take no damage\n");
+    printf("  --keys        carry every key\n");
+    printf("  --weapon N    own every weapon and hold slot N, kept fed (1 blaster ..\n"
+           "                11 BFG; 0 leaves the inventory alone)\n");
+    printf("  --no-autoswitch  keep the disc's pickup rule, which only leaves the blaster\n");
+    printf("  --armour KIND wear body|combat|jacket|shard|shield|both\n");
+    printf("  --powerup KIND hold quad|invuln|enviro|breather for HUD capture\n");
+    printf("  --shoot       hold fire\n");
+    printf("  --shoot-to-kill  ...until the first creature dies, then let go\n");
+    printf("  --trace-cre N log creature N's move, frame and attack state each AI\n"
+           "                tick, for its first 400 ticks\n");
+    printf("  --continues N seed the death page's RESUPPLY count (0..255)\n");
+    printf("  --pause N     press START at frame N: the pause menu, for capture\n");
+    printf("  --press N     press a key at frame N: ends the attract demo or skips a film\n");
+    printf("  --restart N   take RESTART LEVEL at frame N, for capture\n");
+    printf("  --objectives N  raise the objectives pop-up at frame N\n");
+    printf("  --save-load N quick-save at frame N and quick-load on the next\n");
+    printf("  --fire-triggers [F]  fire every trigger volume at frame F (default:\n"
+           "                the first), and again after every level change\n");
+    printf("  --fire-event NAME [F]  queue ONE named Events entry point at\n"
+           "                frame F, instead of every trigger volume on the\n"
+           "                map. Level authors name the interesting ones\n"
+           "                (BIGGUN: PLATFORM, DestroyGlass, GravTeleport)\n");
+    printf("  --glint       draw the glint the F6 key toggles\n");
+    printf("  --no-lasers   draw no laser beams (they still do damage)\n");
+    printf("  --dm-stage    line the arena's players up facing each other, fire held\n");
     printf("  --zone-trace  log every zone gate, teleport and unexplained\n"
            "                jump in the player's position while you play\n");
     printf("  --zone-probe  ...and, without playing, where each of this map's\n"
            "                zone gates leads and whether it lands anywhere\n");
-    printf("  --report      print the run's own counters at exit, one\n"
-           "                'report.<group>.<name> <integer>' per line\n");
     printf("  --ot-range N  how far the depth sort reaches, in world units\n"
            "                (default %d)\n", Q2_CAMERA_SORT_RANGE);
     printf("  --sort-data   use the zone's authored SortData (the default)\n");
@@ -23541,18 +23663,35 @@ int main(int argc, char **argv)
     s16        mp_minutes = -2;
 
 
+    /* One validated number for the flag at argv[i], which consumes the value
+     * after it; a bad one is reported (client_arg_long) and ends the run. */
+#define CLIENT_ARG_NUM(dst, type, lo, hi) do {                               \
+        long arg_value_;                                                      \
+        const char *arg_flag_ = argv[i];                                      \
+        if (!client_arg_long(arg_flag_, argv[++i], (lo), (hi), &arg_value_))  \
+            return 2;                                                         \
+        (dst) = (type)arg_value_;                                             \
+    } while (0)
+
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--disc") && i + 1 < argc)       disc_path = argv[++i];
         else if (!strcmp(argv[i], "--map") && i + 1 < argc) { map = argv[++i]; map_given = true; }
-        else if (!strcmp(argv[i], "--zone") && i + 1 < argc)  { zone_index = atoi(argv[++i]); zone_given = true; }
-        else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = c.win_scale = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--zone") && i + 1 < argc) {
+            CLIENT_ARG_NUM(zone_index, int, 0, 99);
+            zone_given = true;
+        }
+        else if (!strcmp(argv[i], "--scale") && i + 1 < argc) {
+            CLIENT_ARG_NUM(scale, int, 1, 8);
+            c.win_scale = scale;
+        }
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) {
             char tail;
             if (sscanf(argv[++i], "%dx%d%c", &c.output_width,
                        &c.output_height, &tail) != 2 ||
                 c.output_width < 16 || c.output_height < 16 ||
                 c.output_width > 32768 || c.output_height > 32768) {
-                fprintf(stderr, "--size wants WxH with dimensions from 16 to 32768\n");
+                client_fail("--size wants WxH with dimensions from 16 to 32768, not '%s'",
+                            argv[i]);
                 return 2;
             }
         }
@@ -23576,7 +23715,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--watch"))                 c.watch = true;
         else if (!strcmp(argv[i], "--watch-hold") && i + 1 < argc) {
             c.watch      = true;
-            c.watch_hold = (u32)atoi(argv[++i]);
+            CLIENT_ARG_NUM(c.watch_hold, u32, 0, 1000000);
         }
         else if (!strcmp(argv[i], "--zone-probe"))            zone_probe = true;
         else if (!strcmp(argv[i], "--sort-data"))             c.use_sort = true;
@@ -23585,8 +23724,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--god"))                   c.god = true;
         else if (!strcmp(argv[i], "--no-loadout"))            c.no_loadout = true;
         else if (!strcmp(argv[i], "--continues") && i + 1 < argc)
-            c.continues = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--ot-range") && i + 1 < argc) c.ot_range = atoi(argv[++i]);
+            CLIENT_ARG_NUM(c.continues, int, 0, 255);       /* a byte, 0x800B335D */
+        else if (!strcmp(argv[i], "--ot-range") && i + 1 < argc)
+            CLIENT_ARG_NUM(c.ot_range, s32, 0, 1000000);    /* 0 is the default */
         else if (!strcmp(argv[i], "--zone-trace"))            c.zone_trace = true;
         else if (!strcmp(argv[i], "--report"))                c.report = true;
         else if (!strcmp(argv[i], "--fire-triggers")) {
@@ -23595,21 +23735,23 @@ int main(int argc, char **argv)
              * door. Without it, the first simulated frame. */
             c.fire_triggers = true;
             if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9')
-                c.fire_at_frame = strtol(argv[++i], NULL, 10);
+                CLIENT_ARG_NUM(c.fire_at_frame, long, 0, 0x7FFFFFFFL);
             c.fire_interval = c.fire_at_frame > 0 ? c.fire_at_frame : 60;
         }
         else if (!strcmp(argv[i], "--fire-event") && i + 1 < argc) {
             c.fire_event = argv[++i];
             if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9')
-                c.fire_at_frame = strtol(argv[++i], NULL, 10);
+                CLIENT_ARG_NUM(c.fire_at_frame, long, 0, 0x7FFFFFFFL);
         }
         else if (!strcmp(argv[i], "--at") && i + 1 < argc) {
             int x = 0, y = 0, z = 0;
-            if (sscanf(argv[++i], "%d,%d,%d", &x, &y, &z) == 3) {
+            char tail;
+            /* `%c` catches a fourth field or trailing junk ("1,2,3x"). */
+            if (sscanf(argv[++i], "%d,%d,%d%c", &x, &y, &z, &tail) == 3) {
                 c.at[0] = x; c.at[1] = y; c.at[2] = z;
                 c.at_given = true;
             } else {
-                fprintf(stderr, "--at wants X,Y,Z\n");
+                client_fail("--at wants X,Y,Z (three whole numbers), not '%s'", argv[i]);
                 return 2;
             }
         }
@@ -23634,7 +23776,7 @@ int main(int argc, char **argv)
          * the sim and each had to be wired separately.
          */
         else if (!strcmp(argv[i], "--save-load") && i + 1 < argc)
-            c.save_load_at = strtol(argv[++i], NULL, 10);
+            CLIENT_ARG_NUM(c.save_load_at, long, 0, 0x7FFFFFFFL);
         /* `--credits`: open the roll straight away. A headless run cannot walk
          * the title screen to OPTIONS and press X. */
         else if (!strcmp(argv[i], "--credits"))               c.show_credits = true;
@@ -23668,22 +23810,23 @@ int main(int argc, char **argv)
          * pause menu's MISSION row, and a headless run can walk into neither.
          */
         else if (!strcmp(argv[i], "--objectives") && i + 1 < argc)
-            c.popup_at_frame = (s32)strtol(argv[++i], NULL, 10);
+            CLIENT_ARG_NUM(c.popup_at_frame, s32, 0, 0x7FFFFFFFL);
         /* `--pause N`: player one presses START at frame N, so a headless
          * run can capture the pause menu over any map. */
         else if (!strcmp(argv[i], "--pause") && i + 1 < argc)
-            c.pause_at_frame = (s32)strtol(argv[++i], NULL, 10);
+            CLIENT_ARG_NUM(c.pause_at_frame, s32, 0, 0x7FFFFFFFL);
         /* `--press N`: a key pressed at frame N, which is what ends the
          * attract demo and resets the title's idle (selfplay.h). */
         else if (!strcmp(argv[i], "--press") && i + 1 < argc)
-            c.press_at_frame = (s32)strtol(argv[++i], NULL, 10);
+            CLIENT_ARG_NUM(c.press_at_frame, s32, 0, 0x7FFFFFFFL);
         /* `--restart N`: RESTART LEVEL taken at frame N, as the death and
          * pause pages raise it, so a headless run can capture the return. */
         else if (!strcmp(argv[i], "--restart") && i + 1 < argc)
-            c.restart_at_frame = (s32)strtol(argv[++i], NULL, 10);
-        /* `--weapon N`: hold weapon slot N, fed. See the field's note. */
+            CLIENT_ARG_NUM(c.restart_at_frame, s32, 0, 0x7FFFFFFFL);
+        /* `--weapon N`: hold weapon slot N, fed. See the field's note. Slots
+         * past Q2_WID_COUNT used to be dropped without a word. */
         else if (!strcmp(argv[i], "--weapon") && i + 1 < argc)
-            c.give_weapon = (int)strtol(argv[++i], NULL, 10);
+            CLIENT_ARG_NUM(c.give_weapon, int, 0, Q2_WID_COUNT);
         else if (!strcmp(argv[i], "--powerup") && i + 1 < argc) {
             const char *w = argv[++i];
 
@@ -23692,7 +23835,7 @@ int main(int argc, char **argv)
             else if (!strcmp(w, "enviro"))   c.give_powerup = Q2_POWERUP_ENVIRO;
             else if (!strcmp(w, "breather")) c.give_powerup = Q2_POWERUP_BREATHER;
             else {
-                fprintf(stderr, "--powerup wants quad|invuln|enviro|breather\n");
+                client_fail("--powerup wants quad|invuln|enviro|breather, not '%s'", w);
                 return 2;
             }
         }
@@ -23717,7 +23860,7 @@ int main(int argc, char **argv)
                 c.give_armour_cells  = 100;
             }
             else {
-                fprintf(stderr, "--armour wants body|combat|jacket|shield|both\n");
+                client_fail("--armour wants body|combat|jacket|shard|shield|both, not '%s'", w);
                 return 2;
             }
         }
@@ -23726,41 +23869,54 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--movie") && i + 1 < argc)
             c.film_arg = argv[++i];
         else if (!strcmp(argv[i], "--yaw") && i + 1 < argc) {
-            c.at_yaw = (s16)atoi(argv[++i]);
+            CLIENT_ARG_NUM(c.at_yaw, s16, -32768, 32767);
             c.yaw_given = true;
         }
         else if (!strcmp(argv[i], "--pitch") && i + 1 < argc) {
-            c.at_pitch = (s16)atoi(argv[++i]);
+            CLIENT_ARG_NUM(c.at_pitch, s16, -32768, 32767);
             c.pitch_given = true;
         }
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc)
-            c.frames_total = strtol(argv[++i], NULL, 10);
+            CLIENT_ARG_NUM(c.frames_total, long, 0, 0x7FFFFFFFL);
         else if (!strcmp(argv[i], "--shot") && i + 1 < argc)
             c.shot_path = argv[++i];
         else if (!strcmp(argv[i], "--shot-every") && i + 1 < argc)
-            c.shot_every = strtol(argv[++i], NULL, 10);
+            CLIENT_ARG_NUM(c.shot_every, long, 0, 0x7FFFFFFFL);
         else if (!strcmp(argv[i], "--shot-display") && i + 1 < argc)
             c.shot_display_path = argv[++i];
         else if (!strcmp(argv[i], "--screen-pos") && i + 2 < argc) {
+            /* The page's own range (Q2_MENU_SCREEN_*); the apply below still
+             * clamps, but a value past it is a mistake worth saying so. */
+            long px, py;
+
+            if (!client_arg_long("--screen-pos X", argv[i + 1], Q2_MENU_SCREEN_X_MIN,
+                                 Q2_MENU_SCREEN_X_MAX, &px) ||
+                !client_arg_long("--screen-pos Y", argv[i + 2], Q2_MENU_SCREEN_Y_MIN,
+                                 Q2_MENU_SCREEN_Y_MAX, &py))
+                return 2;
+            i += 2;
             c.screen_pos_set = true;
-            c.screen_pos_x = (int)strtol(argv[++i], NULL, 10);
-            c.screen_pos_y = (int)strtol(argv[++i], NULL, 10);
+            c.screen_pos_x = (int)px;
+            c.screen_pos_y = (int)py;
         }
         else if (!strcmp(argv[i], "--saves") && i + 1 < argc) q2_save_set_dir(argv[++i]);
         else if (!strcmp(argv[i], "--dm")) {
             c.mp_enabled = true;
             if (!map_given) { map = "MATRIX1"; map_given = true; }
         }
+        /* Out-of-range modes and counts used to be clamped in silence by
+         * client_mp_configure: `--dm-players 9` ran four, `--dm-mode 7` ran a
+         * deathmatch. */
         else if (!strcmp(argv[i], "--dm-mode") && i + 1 < argc)
-            mp_mode = (q2_mp_mode)atoi(argv[++i]);
+            CLIENT_ARG_NUM(mp_mode, q2_mp_mode, 0, Q2_MP_MODE_COUNT - 1);
         else if (!strcmp(argv[i], "--dm-players") && i + 1 < argc)
-            mp_players = atoi(argv[++i]);
+            CLIENT_ARG_NUM(mp_players, int, 2, Q2_MP_MAX_PLAYERS);
         else if (!strcmp(argv[i], "--dm-split") && i + 1 < argc) {
             const char *split = argv[++i];
             if (!strcmp(split, "horizontal"))      mp_horizontal_split = 1;
             else if (!strcmp(split, "vertical"))   mp_horizontal_split = 0;
             else {
-                fprintf(stderr, "--dm-split wants horizontal|vertical\n");
+                client_fail("--dm-split wants horizontal|vertical, not '%s'", split);
                 return 2;
             }
         }
@@ -23769,20 +23925,14 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--dm-stage"))
             c.mp_stage = true;
         else if (!strcmp(argv[i], "--trace-cre") && i + 1 < argc)
-            c.trace_cre = atoi(argv[++i]);
+            CLIENT_ARG_NUM(c.trace_cre, int, -1, 0x7FFF);
+        /* -1 is Q2_MP_NO_LIMIT, the value the menu's last option stores. */
         else if (!strcmp(argv[i], "--dm-frags") && i + 1 < argc)
-            mp_frags = (s16)atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--dm-rounds") && i + 1 < argc) {
-            char *end;
-            long value = strtol(argv[++i], &end, 10);
-            if (*end || value < 1 || value > 32767) {
-                fprintf(stderr, "--dm-rounds wants an integer from 1 to 32767\n");
-                return 2;
-            }
-            mp_rounds = (s16)value;
-        }
+            CLIENT_ARG_NUM(mp_frags, s16, -1, 32767);
+        else if (!strcmp(argv[i], "--dm-rounds") && i + 1 < argc)
+            CLIENT_ARG_NUM(mp_rounds, s16, 1, 32767);
         else if (!strcmp(argv[i], "--dm-minutes") && i + 1 < argc)
-            mp_minutes = (s16)atoi(argv[++i]);
+            CLIENT_ARG_NUM(mp_minutes, s16, -1, 32767);
         else if (!strcmp(argv[i], "--aspect") && i + 1 < argc) {
             const char *a = argv[++i];
             if      (!strcmp(a, "auto"))    c.fit = Q2_SCREEN_FIT_AUTO;
@@ -23790,22 +23940,56 @@ int main(int argc, char **argv)
             else if (!strcmp(a, "tv"))      c.fit = Q2_SCREEN_FIT_TELEVISION;
             else if (!strcmp(a, "square"))  c.fit = Q2_SCREEN_FIT_SQUARE;
             else if (!strcmp(a, "stretch")) c.fit = Q2_SCREEN_FIT_STRETCH;
-            else { usage(); return 1; }
+            else {
+                client_fail("--aspect wants auto|4:3|tv|square|stretch, not '%s'", a);
+                return 2;
+            }
         }
-        else { usage(); return 1; }
+        /*
+         * A bare path is the disc. It is what Windows passes when an image is
+         * dropped on the executable or opened with it, and that used to print
+         * the usage into a log and raise "could not start".
+         */
+        else if (argv[i][0] != '-' && !disc_path)
+            disc_path = argv[i];
+        /*
+         * Anything else used to print the whole usage and exit 1 without
+         * naming the word it did not understand -- the same answer for a typo
+         * and for `--frames` with its number forgotten.
+         */
+        else if (client_flag_takes_value(argv[i])) {
+            client_fail("%s needs a value%s; q2psx --help describes it", argv[i],
+                        !strcmp(argv[i], "--screen-pos") ? " (X and Y)" : "");
+            return 2;
+        }
+        else if (argv[i][0] != '-') {
+            client_fail("two discs given: '%s' and '%s'", disc_path, argv[i]);
+            return 2;
+        }
+        else {
+            client_fail("unknown option '%s'; q2psx --help lists them", argv[i]);
+            return 2;
+        }
     }
+#undef CLIENT_ARG_NUM
 
     /*
      * NO DISC NAMED, so ask — unless nobody is there to answer. A headless
-     * run is a script, and a script that forgot --disc wants the usage and a
-     * failing exit code, not a window it cannot see.
+     * run is a script, and a script that forgot --disc wants a failing exit
+     * code and the reason, not a window it cannot see.
      */
     if (!disc_path || show_launcher) {
         q2_launcher_options options = {0};
         int launched;
-        if (c.headless && (!show_launcher || !c.shot_path)) {
-            usage();
-            return 1;
+        if (c.headless && !show_launcher) {
+            client_fail("--headless needs --disc PATH: there is nobody to pick "
+                        "one in the selector");
+            return 2;
+        }
+        if (c.headless && !c.shot_path) {
+            client_fail("--launcher --headless only captures the selector, and "
+                        "needs --shot P.bmp");
+            return 2;
         }
         options.width = c.output_width;
         options.height = c.output_height;
@@ -23822,14 +24006,31 @@ int main(int argc, char **argv)
     }
 
     if (disc_open(&c.disc, disc_path) != Q2_OK) {
-        fprintf(stderr, "cannot open disc '%s'\n", disc_path);
+        char what[256], todo[256];
+
+        /* disc_open says only "not found" or "bad format"; the reason and
+         * the fix are worked out from outside it (launchcfg.h). */
+        q2_launch_disc_problem(disc_path, what, sizeof(what), todo, sizeof(todo));
+        client_fail("cannot open disc '%s'", disc_path);
+        client_fail("%s", what);
+        client_fail("%s", todo);
         q2_launcher_host_close(&launch_host);
         SDL_Quit();
         return 1;
     }
 
-    if (q2_identify(c.disc, &c.build) != Q2_OK) {
-        fprintf(stderr, "this does not look like a Quake II PSX disc\n");
+    /*
+     * q2_identify succeeds for ANY disc with a SYSTEM.CNF, so another
+     * PlayStation game used to pass as an "uncatalogued build" and fail later,
+     * level by level. Every path this client reads is under Q2DATA/LEVELS, so
+     * a disc without that tree cannot be played whatever its serial says.
+     */
+    if (q2_identify(c.disc, &c.build) != Q2_OK || !c.build.data_tree_ok) {
+        client_fail("'%s' is not Quake II for the PlayStation%s%s%s", disc_path,
+                    c.build.serial[0] ? " (it is " : "", c.build.serial,
+                    c.build.serial[0] ? ")" : "");
+        client_fail("This game reads the Europe (SLES-01534) or USA (SLUS-00757) "
+                    "release. Check the disc, or the image you picked.");
         disc_close(c.disc);
         q2_launcher_host_close(&launch_host);
         SDL_Quit();
@@ -23887,7 +24088,7 @@ int main(int argc, char **argv)
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
-        fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+        client_fail("the window system did not start (SDL_Init: %s)", SDL_GetError());
         disc_close(c.disc);
         q2_launcher_host_close(&launch_host);
         SDL_Quit();
@@ -23953,7 +24154,7 @@ int main(int argc, char **argv)
         }
     }
     if (!c.window) {
-        fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
+        client_fail("the game window could not open (SDL_CreateWindow: %s)", SDL_GetError());
         SDL_Quit();
         disc_close(c.disc);
         return 1;
@@ -24399,7 +24600,30 @@ no_window:
     }
 
     if (!client_load_zone(&c, map, zone_index)) {
-        fprintf(stderr, "cannot load %s zone %d\n", map, zone_index);
+        /* Which of the two it was: a level that is not on the disc (a typo
+         * in --map) or a zone past the level's last. Both used to read
+         * "cannot load X zone N". */
+        char probe[96];
+        int zones = 0;
+
+        snprintf(probe, sizeof(probe), "Q2DATA/LEVELS/%s/COMMON.DAT", map);
+        if (!disc_find(c.disc, probe)) {
+            client_fail("this disc has no level '%s'. --map takes a level directory "
+                        "such as BASE1 or MATRIX1, or a level-table name; "
+                        "q2psx-inspect levels <disc> lists them", map);
+        } else {
+            for (;; zones++) {
+                snprintf(probe, sizeof(probe), "Q2DATA/LEVELS/%s/ZONE%d.DAT", map, zones);
+                if (!disc_find(c.disc, probe))
+                    break;
+            }
+            if (zones > 0 && zone_index >= zones)
+                client_fail("%s has no zone %d: its zones are 0 to %d", map,
+                            zone_index, zones - 1);
+            else
+                client_fail("cannot load %s zone %d (the disc's data did not read)",
+                            map, zone_index);
+        }
         exit_code = 1;
         goto done;
     }
@@ -24431,7 +24655,8 @@ no_window:
             client_menu_close(&c);
             c.in_front_end = false;
         } else {
-            fprintf(stderr, "no such movie: %s\n", c.film_arg);
+            client_fail("no such movie: %s (they are in Q2DATA/MOVIES; q2psx --help "
+                        "names this disc's three)", c.film_arg);
             exit_code = 1;
             goto done;
         }
@@ -24502,8 +24727,17 @@ no_window:
             }
             if (gp >= 0 && (ev.type == SDL_EVENT_GAMEPAD_ADDED ||
                             ev.type == SDL_EVENT_GAMEPAD_REMOVED)) {
-                Q2_INFO("controller: player %d %s", gp + 1,
-                        c.gamepads.id[gp] ? "connected" : "disconnected");
+                /* Named by the PLAYER the slot drives, not the slot: a
+                 * single-player pad sits in slot 1 and used to be logged as
+                 * "player 2 connected" although it is player one's. */
+                int who_pad = client_slot_player(&c, gp);
+
+                if (who_pad >= 0)
+                    Q2_INFO("controller: player %d's pad %s (slot %d)", who_pad + 1,
+                            c.gamepads.id[gp] ? "connected" : "disconnected", gp);
+                else
+                    Q2_INFO("controller: a spare pad %s (slot %d, no player)",
+                            c.gamepads.id[gp] ? "connected" : "disconnected", gp);
                 /* The pad set changed, so the VIBRATION gate has to be asked
                  * again — a DualShock plugged in mid-session is shockable and
                  * the pad that just left is not. */

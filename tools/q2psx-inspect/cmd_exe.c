@@ -422,7 +422,28 @@ int cmd_xrefs(const disc *d, const char *addr_s)
                 continue;
             }
 
-            if ((in.op == 0x09 || in.op == 0x08 || in.op == 0x0D) &&
+            /*
+             * `addiu rX, gp, N`: the ADDRESS of a small global, which is how
+             * this compiler passes one by pointer or walks its fields
+             * (`addiu v0, gp, 520` at 0x800348A0). Before this the sweep only
+             * saw $gp used directly as a load/store base, so a global reached
+             * this way, and every field read through the formed register,
+             * reported no references at all. Not while $gp is itself being
+             * formed (`lui gp` / `addiu gp, gp, -6656` at 0x80085FD0), when it
+             * holds the high half and the existing pair rule applies.
+             */
+            if ((in.op == 0x09 || in.op == 0x08) && in.rs == 28 && !pending[28]) {
+                u32 v = exe.gp0 + (u32)in.imm;
+                if (v == want) {
+                    printf("  gp    %08X  %s\n", a, in.text);
+                    n_gp++;
+                }
+                if (in.rt < 32 && in.rt != 0 && in.rt != 28) {
+                    pending[in.rt]     = true;
+                    pending_val[in.rt] = v;
+                    formed = true;
+                }
+            } else if ((in.op == 0x09 || in.op == 0x08 || in.op == 0x0D) &&
                 pending[in.rs]) {
                 u32 v = (in.op == 0x0D) ? (pending_val[in.rs] | in.uimm)
                                         : (pending_val[in.rs] + (u32)in.imm);

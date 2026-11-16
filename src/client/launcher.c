@@ -226,6 +226,17 @@ static void set_status(launcher *l, bool error, const char *fmt, ...)
     l->status_error = error;
 }
 
+/* An image that did not open: why, in the status line's one sentence
+ * (q2_launch_disc_problem) -- a missing track BIN by name, a CHD, PC Quake II
+ * -- where it used to say only "That cannot be read as a disc image." */
+static void status_unreadable(launcher *l, const src_entry *s)
+{
+    char what[sizeof(l->status)];
+
+    q2_launch_disc_problem(s->path, what, sizeof(what), NULL, 0);
+    set_status(l, true, "%s", what);
+}
+
 /* ------------------------------------------------------------------------- */
 /* The sources                                                                */
 /* ------------------------------------------------------------------------- */
@@ -251,7 +262,10 @@ static void identify(src_entry *s)
     q2_log_set_level(Q2_LOG_ERROR);
     if (disc_open(&d, s->path) != Q2_OK) {
         s->state = s->kind == SRC_DRIVE ? SRC_NO_DISC : SRC_UNREADABLE;
-    } else if (q2_identify(d, &id) != Q2_OK) {
+    } else if (q2_identify(d, &id) != Q2_OK || !id.data_tree_ok) {
+        /* Any PlayStation disc identifies (it has a serial); only one with
+         * the Q2DATA/LEVELS tree is this game. Another game used to be
+         * listed as a ready "uncatalogued build". */
         s->state = SRC_NOT_Q2;
     } else {
         s->state = SRC_READY;
@@ -1079,7 +1093,16 @@ static void take_path(launcher *l, const char *path)
     }
     s = add_image(l, path);
     if (!s) {
-        set_status(l, true, "That file cannot be opened.");
+        /* A dropped folder, PC Quake II's pak, a name that is not there:
+         * say which (launchcfg.h) rather than "cannot be opened". */
+        char what[sizeof(l->status)];
+
+        if (l->count >= L_MAX_SOURCES)
+            set_status(l, true, "That file cannot be opened.");
+        else {
+            q2_launch_disc_problem(path, what, sizeof(what), NULL, 0);
+            set_status(l, true, "%s", what);
+        }
         return;
     }
     l->sel = (int)(s - l->src);
@@ -1087,10 +1110,11 @@ static void take_path(launcher *l, const char *path)
     scroll_to_selection(l);
     if (s->state == SRC_READY)
         set_status(l, false, "%s is ready.", s->title);
+    else if (s->state == SRC_NOT_Q2)
+        set_status(l, true, "%s is not a Quake II PlayStation disc.",
+                   path_tail(s->path));
     else
-        set_status(l, true, "%s is %s.", path_tail(s->path),
-                   s->state == SRC_NOT_Q2 ? "not a Quake II PlayStation disc"
-                                          : "not a disc image this can read");
+        status_unreadable(l, s);
 }
 
 static void browser_choose(launcher *l)
@@ -1163,7 +1187,7 @@ static bool activate(launcher *l)
         return false;
     case SRC_UNREADABLE:
     case SRC_UNCHECKED:
-        set_status(l, true, "That cannot be read as a disc image.");
+        status_unreadable(l, s);
         return false;
     }
 
@@ -1592,9 +1616,22 @@ int q2_launcher_run(char *out, size_t cap, q2_launcher_host *host,
     load_art(l);
     build_sources(l, options->disc);
     if (options->disc) {
-        add_image(l, options->disc);
+        src_entry *s = add_image(l, options->disc);
+        char what[sizeof(l->status)];
+
         l->sel = find_src(l, options->disc);
         if (l->sel < 0) l->sel = 0;
+        /* The disc it was handed and why it is not playable, up front,
+         * rather than only once START GAME has been tried on it. */
+        if (s && s->state == SRC_NOT_Q2)
+            set_status(l, true, "%s is not a Quake II PlayStation disc.",
+                       path_tail(s->path));
+        else if (s && s->state != SRC_READY)
+            status_unreadable(l, s);
+        else if (!s && !cd_drive_parse(options->disc, NULL, 0, NULL, 0)) {
+            q2_launch_disc_problem(options->disc, what, sizeof(what), NULL, 0);
+            set_status(l, true, "%s", what);
+        }
     }
     load_font(l);
     scroll_to_selection(l);

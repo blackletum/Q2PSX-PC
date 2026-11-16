@@ -53,6 +53,23 @@ void q2_log(q2_log_level level, const char *fmt, ...)
     if (level > g_log_level)
         return;
 
+    /* One write per line. stderr is unbuffered, so the three calls below are
+     * three system calls a line, and a level load logs a few hundred lines:
+     * with stderr redirected to a file that was a quarter of the load. The
+     * bytes are the same; a line too long for the buffer still takes the
+     * three-call path. */
+    {
+        char line[1024];
+        int n = snprintf(line, sizeof(line), "[%s] ", tag[level]), m;
+        va_start(ap, fmt);
+        m = vsnprintf(line + n, sizeof(line) - (size_t)n, fmt, ap);
+        va_end(ap);
+        if (m >= 0 && (size_t)n + (size_t)m + 1 < sizeof(line)) {
+            line[n + m] = '\n';
+            fwrite(line, 1, (size_t)n + (size_t)m + 1, stderr);
+            return;
+        }
+    }
     fprintf(stderr, "[%s] ", tag[level]);
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);

@@ -194,7 +194,14 @@ of GPU execution cycles. See the fixture README for provenance and reproduction.
    captures are available here. The user's PAL disc supports deterministic port
    captures, not a pixel-equivalence claim for retail gameplay. NTSC still needs
    matching disc/state captures, including near-eye geometry, translucent effects,
-   water and multiple viewports.
+   water and multiple viewports. Since 28 October, inputs to the picture have
+   been matched, though no picture has: `test_vram_native` matches every
+   rectangle of every loadable level's VRAM with the console's own load on both
+   discs (530 rectangles, 45 maps). The camera build's row scales (0x80055DE4) and
+   the SortData region rectangles match the lockstep oracle at BASE3 frame 291.
+   The display shows the 240 lines PutDispEnv programs. See the
+   [functional audit](FUNCTIONAL-AUDIT.md), 4 November section. The oracle
+   records the view's position and angles but renders nothing.
 2. **Cycle timing and scanout.** Texture/CLUT visibility now follows command
    order. GPU command duration, CPU/DMA contention and scanout racing the draw
    stream remain unmodeled. The port executes completed logical packets rather

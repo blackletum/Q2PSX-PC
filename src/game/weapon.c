@@ -338,7 +338,10 @@ void q2_weapon_muzzle_origin(const s16 muzzle[3], const s32 eye[3],
      * is the whole correctness argument: the shot has to leave from the point
      * the picture draws the barrel at, and the picture is drawn with
      * q2_rotation_view(cam->yaw, cam->pitch, cam->roll) (world.c, modeldraw.c).
-     * Applying that matrix's transpose is what makes the two agree.
+     * Applying that matrix's transpose is what makes the two agree. (It is
+     * the same rotation as the player's own RotMatrix, which this now builds
+     * instead — see the end of this function — so the two agree to within the
+     * one unit their roundings differ by.)
      *
      * WHAT WAS HERE, and why 28 passing tests did not catch it. The basis was
      * hand-rolled as right/up/fwd, and the `up` row was the view matrix's row 1
@@ -383,14 +386,32 @@ void q2_weapon_muzzle_origin(const s16 muzzle[3], const s32 eye[3],
      * whose pitch turns the other way from this view matrix's. With the
      * view's sign the machinegun's muzzle came out 97 units short and 300
      * low while the player looked up, and so did the shot and its noise.
+     * RotMatrix below takes object+230 as it stands, so the pitch goes in
+     * un-negated there.
      */
-    q2_rotation_view(rot, yaw, -pitch, roll);
+    /*
+     * AND THE MATRIX IS ROTMATRIX'S OWN, not the view's transpose. The two
+     * compose the same rotation but round their entries differently: the view
+     * basis forms Rx*Ry and then mixes the roll in with a second `>> 12`, where
+     * RotMatrix (0x80089E38) forms each entry from its own products
+     * (q2_rotation_euler, trig.c). An entry one LSB apart moved the muzzle a
+     * unit in 186 of the 1,536 native cases (test_weapon, `native_muzzle`),
+     * with zero roll as often as not. So this builds object+0x2C0 as
+     * 0x8003AB60 does, from (+0xE6, +0xE8, +0xEA) = (pitch, yaw, roll), and
+     * runs RotateS (0x8006FC1C) on it: each ROW times the Y-negated offset,
+     * `sra 12`, stored as a halfword (0x8006FD14..0x8006FD2C) and read back
+     * with `lh` (0x8004C02C). The fire function then adds X and Z and
+     * subtracts Y (0x8004C038, 0x8004C04C, 0x8004C06C).
+     */
+    q2_rotation_euler(rot, pitch, yaw, roll);
 
     for (i = 0; i < 3; i++) {
-        s64 v = (s64)rot[0][i] * muzzle[0]
-              + (s64)rot[1][i] * muzzle[1]
-              + (s64)rot[2][i] * muzzle[2];
-        out[i] = eye[i] + (i == 1 ? -(s32)((-v) >> 12) : (s32)(v >> 12));
+        s32 v = (s32)rot[i][0] * muzzle[0]
+              - (s32)rot[i][1] * muzzle[1]
+              + (s32)rot[i][2] * muzzle[2];
+        s16 r = (s16)(v >> 12);
+
+        out[i] = eye[i] + (i == 1 ? -(s32)r : (s32)r);
     }
 }
 
