@@ -20,6 +20,29 @@ change; see [`docs/RELEASING.md`](docs/RELEASING.md).
 ## [Unreleased]
 
 ### Reconstruction
+- _Nothing yet._
+
+### Client
+- _Nothing yet._
+
+### Rendering and audio
+- _Nothing yet._
+
+### Tools
+- _Nothing yet._
+
+### Fixes
+- _Nothing yet._
+
+### Build and packaging
+- _Nothing yet._
+
+### Documentation
+- _Nothing yet._
+
+## [0.4.0] - 2026-11-20
+
+### Reconstruction
 - **Every shot leaves from the console's muzzle point, to the unit.** The fire functions rotate the weapon's offset by the player's own RotMatrix at object+0x2C0 (0x80089E38) through RotateS (0x8006FC1C): each row times the Y-negated offset, shifted, stored as a halfword and read back (0x8006FD14..0x8006FD2C, 0x8004C02C), Y subtracted on the way out (0x8004C04C). The port used the view basis's transpose, which composes the same rotation but rounds its entries differently, and 186 of 1,536 cases executed on the disc's own code came out a unit off. `generate_muzzle_reference.py` runs RotMatrix and QPlayerFireBlaster for every weapon's offset, Grenade3's and random ones on both discs, and `test_weapon` now matches all of them.
 - **Bodies block, stop shots and are aimed at from the console's own actor list: last frame's, in slot order.** InitialiseBumpListFrame (0x8005525C) swaps two 32-pointer buffers at the top of every frame, so CheckVersusBumpList, gitrace, the bullet, the rail, both lasers and FindPlayerTarget all read what the previous frame appended, in the order the handlers ran: the player in slot 0, then each creature at its slot's turn. A body is on it only if its handler appended: a creature through its interpolation move's NewTrueMove3d (0x8007EFD0, 0x80045990, while +0x10C bit 0x80000 is clear), a corpse through its handler (0x8007F740), a dying or dead player through 0x80039588 or 0x8003E25C and again through its move while its DEAD bit is down. So a suspended creature, a body on its detach frame and anything past the 32nd entry are in nobody's way, and a corpse smashed after appending is still hit for a frame, as the freed record it leaves. The port rebuilt the list every tick from this frame's players, then every creature by set index, and the creature rounds put the player last. The order is visible: executing 0x800544EC on the same two bodies both ways round lands 246 of 856 crossings elsewhere and stops 111 in the other body. `generate_bump_list_reference.py` runs the console's setup, swap and append over scripted frames and that query in both orders on both discs, and `test_bumplist` matches every frame and all 856 crossings.
 - **A bullet that stops in a body always draws blood.** 0x80048980 calls the spray (0x80048B64) after DoDamage with no test between; the port bled only when health was taken. JAIL2's attract run has two pellets stop in a corpse gibbed the frame before, and the port drew none of the spray's 90 `rand()` values.
@@ -87,7 +110,6 @@ change; see [`docs/RELEASING.md`](docs/RELEASING.md).
 - **The symbol-table census was run again** against the tree (200 named functions neither cited nor named), and the functional audit records each residue's verdict with addresses: the InitMission family, the EVENT.C constructors, the class table's zone-store hooks, the SORT.C dependency pass, the "heavens" overlay list, the scene area stamps and the weapon PreInits are all either already modelled or unreachable on a retail disc.
 - **The named data globals were censused** (1,319 in MAIN.SYM, 517 cited, 92 checked value by value against the executable), and the functional audit's new section records the verdicts, together with DrawModels' +0xF4 gate (equivalent), the muzzle rounding (closed) and the body clip's bump list, whose membership and order are shown not to be native and left open with what closing it needs.
 - **The functional audit's remaining-work table is brought up to 16 November.** Each of its 21 areas names what the 29 October to 16 November work closed, with the commit, and what remains; stale claims in the dated sections are annotated in place, including the seed rule (InitLevel 0x80070DF0..0x80070E30 seeds 13 for every single-player load; the root counter only in multiplayer outside self-play). The README and user guide now cover `launcher.cfg`, dropping a disc on the program, the diagnostic keys and the `--aspect`/`--scale` choices.
-
 ## [0.3.0] - 2026-11-06
 
 ### Reconstruction
