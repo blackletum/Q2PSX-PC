@@ -379,15 +379,18 @@ static int cue_tracks(const char *cue, char *missing, size_t size)
             snprintf(resolved, sizeof(resolved), "%s", name);
         } else {
             char dir[Q2_LAUNCH_PATH_MAX];
+            int n;
 
             snprintf(dir, sizeof(dir), "%s", cue);
             dir[leaf_of(dir) - dir] = '\0';
-            snprintf(resolved, sizeof(resolved), "%s%s", dir, name);
+            n = snprintf(resolved, sizeof(resolved), "%s%s", dir, name);
+            if (n < 0 || (size_t)n >= sizeof(resolved))
+                resolved[0] = '\0';   /* too long to open: reported missing */
         }
         if (path_kind(resolved) != KIND_FILE) {
             fclose(fp);
-            if (missing)
-                snprintf(missing, size, "%s", leaf_of(name));
+            if (missing && snprintf(missing, size, "%s", leaf_of(name)) < 0)
+                missing[0] = '\0';
             return 1;
         }
     }
