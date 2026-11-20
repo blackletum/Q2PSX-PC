@@ -39,7 +39,11 @@ typedef struct style_def {
     u32 fwd_pos, fwd_neg;     /* forward: +127 / -127                        */
     u32 side_neg, side_pos;   /* side:    -127 / +127                        */
     u32 yaw_neg, yaw_pos;     /* yaw, when look == LOOK_BUTTONS              */
-    u32 look_down, look_up;   /* pitch -127 (bit 29) / +127 (bit 30)         */
+    /* pitch -127 (bit 29) / +127 (bit 30). A NEGATIVE pitch looks up, as the
+     * console's object+230 does, so the -127 button is the look-UP one:
+     * Triangle under STANDARD B, R1 under A and C. These were named the other
+     * way round once, after a camera that had the pitch inverted. */
+    u32 look_up, look_down;
 
     /* The four masks the shared tail turns into derived bits. */
     u32 fire, jump, wnext, wprev;
@@ -362,13 +366,13 @@ void q2_pad_read(const q2_pad_state *pad, const q2_pad_config *cfg,
          * set. That pair is the chord the view recentre watches for.
          */
         out->pitch = 0;
-        if (pad->buttons & s->look_down) {
-            out->pitch    = -Q2_PAD_FULL;
-            out->buttons |= Q2_BTN_LOOK_DOWN;
-        }
         if (pad->buttons & s->look_up) {
-            out->pitch    =  Q2_PAD_FULL;
+            out->pitch    = -Q2_PAD_FULL;
             out->buttons |= Q2_BTN_LOOK_UP;
+        }
+        if (pad->buttons & s->look_down) {
+            out->pitch    =  Q2_PAD_FULL;
+            out->buttons |= Q2_BTN_LOOK_DOWN;
         }
         break;
     }

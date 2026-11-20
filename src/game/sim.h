@@ -133,8 +133,8 @@ struct q2_scene_solid;
 #define Q2_BTN_WEAP_NEXT 0x04000000u /* bit 26, 0x8004ECD8                    */
 #define Q2_BTN_WEAP_PREV 0x08000000u /* bit 27, 0x8004ED00                    */
 #define Q2_BTN_PAUSE     0x10000000u /* bit 28, START's press edge @0x80019190*/
-#define Q2_BTN_LOOK_DOWN 0x20000000u /* bit 29, the look-down button held     */
-#define Q2_BTN_LOOK_UP   0x40000000u /* bit 30, the look-up button held       */
+#define Q2_BTN_LOOK_UP   0x20000000u /* bit 29, the look-up button held (-127) */
+#define Q2_BTN_LOOK_DOWN 0x40000000u /* bit 30, the look-down button held      */
 #define Q2_BTN_MOVING    0x80000000u /* bit 31, the FORWARD axis is deflected */
 
 typedef struct q2_input {

@@ -1450,11 +1450,16 @@ void q2_vw_place(const q2_viewweapon *vw,
      * was never applied to the translation.
      *
      * The argument ORDER is the camera's too: `q2_rotation_view` takes
-     * (yaw, pitch, roll), and `ang` is indexed (pitch, yaw, roll) - with
-     * `ang[0]` already negated at the sum above, which is 0x8004F40C's own
-     * negation and is why the pitch is passed back through un-negated here.
+     * (yaw, pitch, roll), and `ang` is indexed (pitch, yaw, roll). And the
+     * pitch goes in AS NEGATED AT THE SUM, because 0x8004F40C's negation is
+     * the very conversion the camera makes: the player's pitch is the
+     * console's object+230, where a negative pitch looks up, and the camera
+     * is built with the renderers' positive-up pitch, its negation
+     * (client_view_pitch). This used to undo the negation here, which was
+     * right only while the camera took the player's pitch un-negated, the
+     * picture looked the wrong way vertically and every shot left the screen.
      */
-    q2_rotation_view(rot, ang[1], -ang[0], ang[2]);
+    q2_rotation_view(rot, ang[1], ang[0], ang[2]);
 
     for (i = 0; i < 3; i++) {
         local[i] = ((s32)rot[0][i] * vw->cur_t[0]

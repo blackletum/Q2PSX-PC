@@ -480,8 +480,10 @@ static void test_roll_reaches_the_offset(void)
      * that same matrix applied FORWARD - and `test_camera_undoes_the_placement`
      * is the check that the matrix is the right one in the first place.
      */
+    /* The camera's pitch is the player's negated (client_view_pitch), which
+     * is what 0x8004F40C's negation at the sum already left in ang[0]. */
     q2_rotation_view(m, ang[1] - vw.cur_r[1],
-                        -(ang[0] - vw.cur_r[0]),
+                        ang[0] - vw.cur_r[0],
                         ang[2] - vw.cur_r[2]);
 
     for (i = 0; i < 3; i++)
@@ -569,8 +571,8 @@ static void test_camera_undoes_the_placement(void)
 
         q2_rotation_view(view, k_cases[i].yaw, k_cases[i].pitch,
                          k_cases[i].roll);
-        /* Exactly what q2_vw_place builds: the x angle negated, y and z as
-         * they come. */
+        /* Exactly what q2_vw_place builds: the camera's own angles, the
+         * pitch negated at the sum as the camera's is. */
         q2_rotation_view(place, k_cases[i].yaw, k_cases[i].pitch,
                          k_cases[i].roll);
 

@@ -2095,6 +2095,26 @@ typedef struct client {
     long             shots_written;
 } client;
 
+/*
+ * THE CAMERA'S PITCH IS THE PLAYER'S, NEGATED.
+ *
+ * The player's pitch is the console's object+230 halfword, and on the console
+ * a NEGATIVE pitch looks up: the fire matrix (RotMatrix of +230, JAIL2's
+ * attract run, record frame 198) and the camera's own forward
+ * (UpdateWindowStuff, 0x80037F10; BASE3's attract run, record frame 496,
+ * pitch -507 gives the plane normal's Y -2874) both turn that way. The
+ * renderers build their view with q2_rotation_view, whose positive pitch
+ * looks UP. Handed the player's pitch as it stands, the picture looked down
+ * whenever the game looked up, so every shot climbed out of the top of the
+ * screen while the view looked at the floor, and fell out of the bottom while
+ * it looked at the ceiling. Every place the camera takes the player's pitch
+ * goes through here; the camera keeps the renderers' convention.
+ */
+static s32 client_view_pitch(s32 pitch)
+{
+    return -pitch;
+}
+
 static void client_bind_view_model(client *c, int pi);
 static void client_reset_view_model(client *c, int pi);
 static void client_bind_player_models(client *c);
@@ -9490,7 +9510,7 @@ static bool client_load_zone(client *c, const char *map, int index)
                         c->cam.pos[1] = c->carry_pos[1];
                         c->cam.pos[2] = c->carry_pos[2];
                         c->cam.yaw    = c->carry_yaw;
-                        c->cam.pitch  = c->carry_pitch;
+                        c->cam.pitch  = client_view_pitch(c->carry_pitch);
                         placed        = true;
                         Q2_INFO("zone gate: carried through at (%d,%d,%d)",
                                 c->carry_pos[0], c->carry_pos[1],
@@ -9571,7 +9591,7 @@ static bool client_load_zone(client *c, const char *map, int index)
                     if (c->yaw_given)
                         c->cam.yaw = c->at_yaw;
                     if (c->pitch_given) {
-                        c->cam.pitch                 = c->at_pitch;
+                        c->cam.pitch                 = client_view_pitch(c->at_pitch);
                         c->sim[0].player[0].pitch    = c->at_pitch;
                     }
                     Q2_INFO("--at (%d,%d,%d) yaw %d",
@@ -11379,7 +11399,7 @@ static bool client_load_zone(client *c, const char *map, int index)
         c->cam.pos[0] = eye[0];
         c->cam.pos[1] = eye[1];
         c->cam.pos[2] = eye[2];
-        c->cam.pitch  = view[0];
+        c->cam.pitch  = client_view_pitch(view[0]);
         c->cam.yaw    = view[1];
         c->cam.roll   = view[2];
     }
@@ -12152,7 +12172,7 @@ static u16 client_pad_mask(const client *c, const q2_pad_bindings *b)
     if (keys[SDL_SCANCODE_LEFT])  pad |= (u16)b->turn_left;
     if (keys[SDL_SCANCODE_RIGHT]) pad |= (u16)b->turn_right;
 
-    /* R1 looks down and L1 up under the digital styles, and holding BOTH is the
+    /* R1 looks up and L1 down under the digital styles, and holding BOTH is the
      * chord that walks the pitch back to level — the console's own recentre,
      * which is why there is no separate key for it. Both are zero under a mouse
      * or stick style, which has no look buttons at all; the arrows drive the
@@ -13295,9 +13315,9 @@ static void client_input_simulated(client *c, float dt)
                 if (keys[SDL_SCANCODE_LEFT])  lx -= key_full;
                 if (keys[SDL_SCANCODE_RIGHT]) lx += key_full;
                 /* The same way round as the digital styles' look buttons:
-                 * SDL_SCANCODE_UP drives `look_up`, which is +Q2_PAD_FULL. */
-                if (keys[SDL_SCANCODE_UP])    ly += key_full;
-                if (keys[SDL_SCANCODE_DOWN])  ly -= key_full;
+                 * SDL_SCANCODE_UP drives `look_up`, which is -Q2_PAD_FULL. */
+                if (keys[SDL_SCANCODE_UP])    ly -= key_full;
+                if (keys[SDL_SCANCODE_DOWN])  ly += key_full;
             }
         }
 
@@ -14813,7 +14833,7 @@ static void client_input_simulated(client *c, float dt)
          * that draws it.
          */
         c->cam.yaw    = c->sim[0].player[0].yaw;
-        c->cam.pitch  = c->sim[0].player[0].pitch;
+        c->cam.pitch  = client_view_pitch(c->sim[0].player[0].pitch);
         c->cam.roll   = c->sim[0].player[0].roll;
     }
 
@@ -14870,8 +14890,9 @@ static void client_input_simulated(client *c, float dt)
              * other way, which looked like a bug and was only ever the aim.
              */
             /* +Y is down, so a target below the eye needs a positive pitch. */
-            c->cam.pitch = (s32)(p * (double)Q2_ANGLE_360 /
-                                 (2.0 * 3.14159265358979323846));
+            c->cam.pitch = client_view_pitch(
+                (s32)(p * (double)Q2_ANGLE_360 /
+                      (2.0 * 3.14159265358979323846)));
             c->cam.roll  = 0;
         }
     }
@@ -14919,7 +14940,9 @@ static void client_input(client *c, float dt)
                       (double)((1 << Q2_LOOK_SCALE_SHIFT) * CLIENT_MOUSE_DIV);
 
         c->cam.yaw   += (s32)(c->look_acc_x * gain);
-        c->cam.pitch += (s32)(c->look_acc_y * gain);
+        /* look_acc_y is the player's pitch sign (negative up); the camera's
+         * is the renderers' (positive up). */
+        c->cam.pitch -= (s32)(c->look_acc_y * gain);
         c->look_acc_x = 0.0;
         c->look_acc_y = 0.0;
     }
@@ -15761,7 +15784,7 @@ static bool client_apply_teleports(client *c)
         c->mp_camera_angles[pi][2] = sim->player[pi].roll;
         if (pi == 0) {
             q2_sim_player_eye(sim, pi, c->cam.pos);
-            c->cam.pitch = sim->player[pi].pitch;
+            c->cam.pitch = client_view_pitch(sim->player[pi].pitch);
             c->cam.yaw = sim->player[pi].yaw;
             c->cam.roll = sim->player[pi].roll;
         }
@@ -16525,7 +16548,8 @@ static void client_voices_update(client *c)
         } else {
             q2_sim_player_eye(&c->sim[0], (int)i, l->pos);
             q2_rotation_view(l->matrix, c->mp_camera_angles[i][1],
-                              c->mp_camera_angles[i][0], c->mp_camera_angles[i][2]);
+                              client_view_pitch(c->mp_camera_angles[i][0]),
+                              c->mp_camera_angles[i][2]);
         }
     }
     for (i = 0; i < CLIENT_VOICES; i++) {
@@ -17473,7 +17497,7 @@ static bool client_apply_save(client *c, const q2_save *s)
     c->cam.pos[1] = eye[1];
     c->cam.pos[2] = eye[2];
     c->cam.yaw    = c->sim[0].player[0].yaw;
-    c->cam.pitch  = c->sim[0].player[0].pitch;
+    c->cam.pitch  = client_view_pitch(c->sim[0].player[0].pitch);
 
     /*
      * DEVIATION, stated: a game loaded from a file becomes the point a restart
@@ -20966,7 +20990,7 @@ static void client_draw_view(void *user, q2_screen *s, int p,
      * Recoil is added to that owner's weapon below, not to the world camera. */
     if (c->mp_enabled && p > 0 && p < Q2_MP_MAX_PLAYERS && c->sim_ready[p]) {
         q2_sim_player_eye(&c->sim[0], p, c->cam.pos);
-        c->cam.pitch = c->mp_camera_angles[p][0];
+        c->cam.pitch = client_view_pitch(c->mp_camera_angles[p][0]);
         c->cam.yaw   = c->mp_camera_angles[p][1];
         c->cam.roll  = c->mp_camera_angles[p][2];
     }
@@ -23004,7 +23028,7 @@ static void usage(void)
     printf("  --screen-pos X Y  override SCREEN POSITION (-20..20, -32..64)\n");
     printf("  --at X,Y,Z    stand here instead of at the zone's spawn point\n");
     printf("  --yaw N       ...facing this way (the engine's 0..4095)\n");
-    printf("  --pitch N     ...and looking this far up or down\n");
+    printf("  --pitch N     ...and looking this far up (negative) or down\n");
     printf("  --coords      show the view's world position and angles along\n"
            "                the top of the frame; the P key toggles the same\n"
            "                readout while you play\n");
@@ -25084,14 +25108,16 @@ no_window:
                  * nothing — the pointer is pinned and only the deltas are real.
                  * Free, it is a pointer and the deltas mean nothing.
                  *
-                 * The two signs are the port's and were settled against the
-                 * picture rather than argued: a frame rendered at pitch 500
-                 * looks at the ceiling, so up is POSITIVE pitch, and moving the
-                 * mouse forward is a negative yrel. Yaw needs no correction.
+                 * Moving the mouse forward is a negative yrel, and a negative
+                 * pitch looks up (the console's object+230; see
+                 * client_view_pitch), so the delta goes in as it comes. These
+                 * signs were once settled against the picture instead, when
+                 * the picture's pitch was the wrong way round, and they made
+                 * the view and the shots disagree. Yaw needs no correction.
                  */
                 if (c.mouse_grabbed) {
                     c.look_acc_x += (double)ev.motion.xrel;
-                    c.look_acc_y -= (double)ev.motion.yrel;
+                    c.look_acc_y += (double)ev.motion.yrel;
                 } else {
                     c.pointer_x     = ev.motion.x;
                     c.pointer_y     = ev.motion.y;

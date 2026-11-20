@@ -115,11 +115,12 @@ static void test_standard_a(void)
     check_eq_i(in.yaw, -Q2_PAD_FULL, "LEFT turns left");
 
     press(&in, Q2_PAD_STYLE_STANDARD_A, Q2_PAD_R1);
-    check_eq_i(in.pitch, -Q2_PAD_FULL, "R1 looks down");
-    check(in.buttons & Q2_BTN_LOOK_DOWN, "and flags the look-down button");
+    check_eq_i(in.pitch, -Q2_PAD_FULL, "R1 looks up (a negative pitch)");
+    check(in.buttons & Q2_BTN_LOOK_UP, "and flags the look-up button");
 
     press(&in, Q2_PAD_STYLE_STANDARD_A, Q2_PAD_L1);
-    check(in.buttons & Q2_BTN_LOOK_UP, "L1 flags the look-up button");
+    check_eq_i(in.pitch, Q2_PAD_FULL, "L1 looks down");
+    check(in.buttons & Q2_BTN_LOOK_DOWN, "L1 flags the look-down button");
 
     press(&in, Q2_PAD_STYLE_STANDARD_A, Q2_PAD_L1 | Q2_PAD_R1);
     check((in.buttons & (Q2_BTN_LOOK_UP | Q2_BTN_LOOK_DOWN)) ==
@@ -431,8 +432,8 @@ static void test_bindings(void)
     check_eq_i(b.strafe_right, Q2_PAD_R2,       "standard A strafes right on R2");
     check_eq_i(b.turn_left,    Q2_PAD_LEFT,     "standard A turns left on LEFT");
     check_eq_i(b.turn_right,   Q2_PAD_RIGHT,    "standard A turns right on RIGHT");
-    check_eq_i(b.look_up,      Q2_PAD_L1,       "standard A looks up on L1");
-    check_eq_i(b.look_down,    Q2_PAD_R1,       "standard A looks down on R1");
+    check_eq_i(b.look_up,      Q2_PAD_R1,       "standard A looks up on R1");
+    check_eq_i(b.look_down,    Q2_PAD_L1,       "standard A looks down on L1");
     check_eq_i(b.fire,         Q2_PAD_CROSS,    "standard A fires on CROSS");
     check_eq_i(b.jump,         Q2_PAD_SQUARE,   "standard A jumps on SQUARE");
     check_eq_i(b.weapon_next,  Q2_PAD_TRIANGLE, "standard A next is TRIANGLE");
